@@ -94,7 +94,7 @@ class ActiveLearningLoop:
         train_cfg = cfg.get("training", {})
         self.lr = train_cfg.get("learning_rate", 1e-4)
         self.weight_decay = train_cfg.get("weight_decay", 0.01)
-        self.use_amp = train_cfg.get("use_amp", True)
+        self.use_amp = train_cfg.get("use_amp", True) and device == "cuda"
 
         # Simulated oracle
         self.oracle = SimulatedOracle(full_labels)
