@@ -281,8 +281,22 @@ class AdaptedSAM2(nn.Module):
                 # Fallback: create 3-channel input on the fly or take first 3 bands
                 pca_rgb = hsi[:, :3, :, :] if B >= 3 else hsi.repeat(1, 3, 1, 1)[:, :3, :, :]
 
+            # SAM2's Hiera backbone uses windowed positional embeddings that
+            # require spatial dimensions to be divisible by a specific factor.
+            # Resize to the nearest compatible size, run the encoder, then
+            # resize features back to the original (H, W).
+            _ALIGN = 64  # Hiera patch_stride(4) × window(8) × hierarchy(2)
+            sam2_H = ((H + _ALIGN - 1) // _ALIGN) * _ALIGN
+            sam2_W = ((W + _ALIGN - 1) // _ALIGN) * _ALIGN
+            if (sam2_H, sam2_W) != (H, W):
+                pca_rgb_resized = F.interpolate(
+                    pca_rgb, size=(sam2_H, sam2_W), mode="bilinear", align_corners=False
+                )
+            else:
+                pca_rgb_resized = pca_rgb
+
             # SAM 2 image encoder forward
-            sam2_out = self.sam2_encoder(pca_rgb)
+            sam2_out = self.sam2_encoder(pca_rgb_resized)
             # Use high-res backbone FPN feature or vision_features
             if "backbone_fpn" in sam2_out and len(sam2_out["backbone_fpn"]) > 0:
                 spatial_feats = sam2_out["backbone_fpn"][0]
