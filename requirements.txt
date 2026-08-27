@@ -1,0 +1,37 @@
+# Core deep learning
+torch>=2.1.0
+torchvision>=0.16.0
+
+# SAM2 — install separately via:
+#   pip install git+https://github.com/facebookresearch/sam2.git
+# Not listed here because pip can't resolve git+ deps in requirements.txt
+# on all platforms reliably.
+
+# Scientific computing
+numpy>=1.24.0
+scipy>=1.10.0          # For loading .mat files (Indian Pines, Pavia)
+scikit-learn>=1.3.0    # PCA, KMeans for active learning
+scikit-image>=0.21.0   # Image processing utilities
+
+# Tensor manipulation
+einops>=0.7.0          # Readable reshape/permute operations
+
+# Configuration
+pyyaml>=6.0            # YAML config parsing
+# omegaconf>=2.3.0     # Optional: hierarchical config (uncomment if needed)
+
+# Visualization & plotting
+matplotlib>=3.7.0
+seaborn>=0.12.0        # Publication-quality plots
+
+# Progress bars
+tqdm>=4.65.0
+
+# Experiment tracking (lightweight — no cloud dependency)
+# tensorboard>=2.14.0  # Optional: uncomment for TensorBoard logging
+
+# Reproducibility
+# torch-deterministic  # Set via torch.use_deterministic_algorithms(True)
+
+# HTTP downloads
+requests>=2.31.0       # For dataset download scripts

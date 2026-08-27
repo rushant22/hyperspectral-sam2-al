@@ -1,0 +1,93 @@
+# =============================================================================
+# Smoke Test Configuration — quick validation that everything works end-to-end.
+# =============================================================================
+# Runs in ~2 minutes on CPU. Use to verify the full pipeline (data loading →
+# training → AL loop → evaluation → plotting) before committing to long runs.
+
+seed: 42
+
+dataset:
+  name: "indian_pines"        # Smallest dataset — fastest iteration
+  root_dir: "./datasets"
+  patch_size: 128
+  patch_overlap: 0.5
+  sam2_input_size: 64          # Tiny input size for speed
+  train_ratio: 0.6
+  val_ratio: 0.2
+  test_ratio: 0.2
+  pca_components: 3
+  normalization: "per_band"
+
+sam2:
+  checkpoint: null             # Not needed for smoke test (uses lightweight encoder)
+  model_cfg: "sam2.1_hiera_b+.yaml"
+  freeze_image_encoder: true
+  freeze_prompt_encoder: true
+  embed_dim: 256
+
+lora:
+  enabled: true
+  rank: 4                     # Smaller rank for speed
+  alpha: 8
+  target_modules: ["q_proj", "v_proj"]
+  dropout: 0.1
+  adapt_mask_decoder: false
+
+adapter:
+  enabled: true
+  num_queries: 4               # Fewer queries for speed
+  d_model: 256
+  num_heads: 4                 # Fewer heads
+  ffn_dim: 256
+  dropout: 0.1
+  use_residual: true
+
+seg_head:
+  type: "conv1x1"
+  hidden_dim: 64
+
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  focal_gamma: 2.0
+  focal_alpha: null
+  dice_smooth: 1.0
+
+training:
+  epochs: 5                    # Very few epochs — just checking it runs
+  batch_size: 1                # Single sample for Indian Pines
+  learning_rate: 1.0e-3
+  decoder_lr: 5.0e-4
+  weight_decay: 0.01
+  optimizer: "adamw"
+  scheduler: "none"
+  warmup_epochs: 1
+  grad_clip_norm: 1.0
+  early_stopping_patience: 100  # Effectively disabled
+  use_amp: false               # Disable AMP for CPU compatibility
+  grad_accumulation_steps: 1
+  device: "cpu"                # Force CPU for smoke test
+
+active_learning:
+  enabled: true
+  initial_labeled_fraction: 0.1
+  num_rounds: 2                # Just 2 rounds to verify the loop works
+  query_fraction_per_round: 0.05
+  mc_dropout_passes: 3         # Fewer passes for speed
+  strategy: "bald"
+  use_spatial_diversity: false  # Skip K-means for speed
+  diversity_clusters: 10
+  ndvi_threshold: 0.2
+  ndvi_red_band: null
+  ndvi_nir_band: null
+  retrain_epochs: 3
+
+evaluation:
+  metrics: ["miou", "per_class_iou", "overall_accuracy"]
+  save_predictions: false
+  output_dir: "./results/smoke_test"
+
+visualization:
+  entropy_high: 0.8
+  entropy_mid: 0.5
+  entropy_low: 0.3

@@ -1,0 +1,30 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Large Datasets & Checkpoints (downloaded on demand via python data/download.py)
+datasets/
+checkpoints/
+*.mat
+*.pt
+*.pth
+
+# Results & logs (generated per experiment run)
+results/
+*.partial
+*.log
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

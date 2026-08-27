@@ -1,0 +1,135 @@
+# =============================================================================
+# Default Configuration — AL-HSI-SAM2
+# =============================================================================
+# All hyperparameters for the entire pipeline are centralized here.
+# Override per-experiment by creating configs/experiment_*.yaml files
+# that only specify the changed values.
+
+# ---- Reproducibility ----
+seed: 42
+
+# ---- Dataset ----
+dataset:
+  name: "pavia"                # Options: "indian_pines", "pavia", "toulouse"
+  root_dir: "./datasets"
+  # Patching: tile large images into overlapping patches for training
+  patch_size: 128              # Spatial patch size (pixels)
+  patch_overlap: 0.5           # Fraction of overlap between adjacent patches
+  # Resize patches to this size before feeding to SAM2 (SAM2 expects larger inputs)
+  sam2_input_size: 256
+  # Train/val/test split ratios (for pixel-level splitting within each patch)
+  train_ratio: 0.6
+  val_ratio: 0.2
+  test_ratio: 0.2
+  # Number of PCA components for baseline (non-adapter) model
+  pca_components: 3
+  # Band normalization strategy: "per_band" (zero-mean, unit-var per band) or "global"
+  normalization: "per_band"
+
+# ---- SAM2 Backbone ----
+sam2:
+  checkpoint: "./checkpoints/sam2.1_hiera_base_plus.pt"
+  model_cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"   # SAM2 config name (from sam2 package)
+  # Freeze the entire image encoder — only adapter + LoRA weights are trained
+  freeze_image_encoder: true
+  # Freeze the prompt encoder — we don't use point/box prompts
+  freeze_prompt_encoder: true
+  # Image encoder output embedding dimension
+  embed_dim: 256
+
+# ---- LoRA Configuration ----
+lora:
+  enabled: true
+  rank: 8                      # Low-rank decomposition rank
+  alpha: 16                    # Scaling factor (effective scale = alpha/rank = 2.0)
+  # Which modules in Hiera to inject LoRA into
+  target_modules: ["q_proj", "v_proj"]
+  dropout: 0.1                 # Also serves as MC-Dropout for uncertainty estimation
+  # Whether to also LoRA-adapt the mask decoder (false = fully trainable decoder)
+  adapt_mask_decoder: false
+
+# ---- Spectral Cross-Attention Adapter ----
+adapter:
+  enabled: true
+  num_queries: 12              # M: number of learnable spectral-response queries
+  d_model: 256                 # Internal dimension (matches SAM2 embed_dim)
+  num_heads: 8                 # Multi-head attention heads
+  ffn_dim: 512                 # Feed-forward network hidden dim
+  dropout: 0.1
+  # Residual connection: add adapter output to PCA-based SAM2 stem output
+  use_residual: true
+
+# ---- Multi-Class Segmentation Head ----
+seg_head:
+  # Added on top of SAM2's mask decoder features
+  type: "conv1x1"              # Options: "conv1x1", "mlp_2layer"
+  # num_classes is set automatically from the dataset
+  hidden_dim: 128              # Only used if type = "mlp_2layer"
+
+# ---- Loss Function ----
+loss:
+  # Composite Focal-Dice loss for class imbalance
+  focal_weight: 1.0            # λ₁
+  dice_weight: 1.0             # λ₂
+  focal_gamma: 2.0             # Focusing parameter
+  focal_alpha: null            # Per-class weights; null = auto from class frequencies
+  dice_smooth: 1.0             # Smoothing epsilon for Dice
+
+# ---- Training ----
+training:
+  epochs: 100
+  batch_size: 4
+  learning_rate: 1.0e-4        # For adapter + LoRA params
+  decoder_lr: 5.0e-5           # Separate LR for mask decoder (lower, since pretrained)
+  weight_decay: 0.01
+  optimizer: "adamw"
+  scheduler: "cosine"          # Options: "cosine", "step", "none"
+  warmup_epochs: 5
+  grad_clip_norm: 1.0
+  # Early stopping patience (validation mIoU)
+  early_stopping_patience: 15
+  # Mixed precision training (saves VRAM)
+  use_amp: true
+  # Gradient accumulation steps (effective batch = batch_size * grad_accum)
+  grad_accumulation_steps: 1
+  # Device
+  device: "cuda"
+
+# ---- Active Learning ----
+active_learning:
+  enabled: true
+  # Initial labeled pool: fraction of total pixels
+  initial_labeled_fraction: 0.05
+  # Number of AL rounds
+  num_rounds: 10
+  # Fraction of total pixels to query per round
+  query_fraction_per_round: 0.02
+  # MC-Dropout forward passes for uncertainty
+  mc_dropout_passes: 10
+  # Query strategy: "bald", "entropy", "random", "badge_inspired"
+  strategy: "bald"
+  # Spatial diversity: K-means on feature embeddings of top-uncertain pixels
+  use_spatial_diversity: true
+  diversity_clusters: 50       # Number of K-means clusters for diversity
+  # NDVI vegetation masking threshold (only query vegetation pixels)
+  ndvi_threshold: 0.2
+  # NDVI band indices (dataset-specific, set automatically if null)
+  ndvi_red_band: null
+  ndvi_nir_band: null
+  # Epochs per AL retraining round (can be fewer than initial training)
+  retrain_epochs: 50
+
+# ---- Evaluation ----
+evaluation:
+  # Metrics to compute
+  metrics: ["miou", "per_class_iou", "overall_accuracy", "kappa"]
+  # Save predictions as images
+  save_predictions: true
+  output_dir: "./results"
+
+# ---- Visualization Dashboard ----
+visualization:
+  # Entropy thresholds for color-coding query markers
+  entropy_high: 0.8            # Red: high uncertainty
+  entropy_mid: 0.5             # Yellow: medium uncertainty
+  entropy_low: 0.3             # Green: low uncertainty

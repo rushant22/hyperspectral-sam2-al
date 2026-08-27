@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AL-HSI-SAM2 — Active Learning Visualization Dashboard</title>
+    <meta name="description" content="Simulated multi-panel visualization dashboard for Active-Learning Hyperspectral Invasive Species Segmentation via Adapted SAM2.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Top Header Bar -->
+    <header class="header">
+        <div class="header__brand">
+            <div class="header__logo">
+                <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                    <circle cx="14" cy="14" r="12" stroke="url(#grad)" stroke-width="2.5" fill="none"/>
+                    <circle cx="14" cy="14" r="5" fill="url(#grad)"/>
+                    <defs><linearGradient id="grad" x1="0" y1="0" x2="28" y2="28">
+                        <stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/>
+                    </linearGradient></defs>
+                </svg>
+            </div>
+            <h1 class="header__title">AL-HSI-SAM2 <span class="header__subtitle">Dashboard</span></h1>
+        </div>
+        <div class="header__controls">
+            <div class="control-group">
+                <label class="control-label" for="dataset-select">Dataset</label>
+                <select id="dataset-select" class="control-select">
+                    <option value="indian_pines">Indian Pines</option>
+                    <option value="pavia">Pavia University</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label class="control-label" for="round-slider">AL Round</label>
+                <div class="slider-container">
+                    <input type="range" id="round-slider" min="0" max="10" value="0" class="control-slider">
+                    <span id="round-display" class="slider-value">0</span>
+                </div>
+            </div>
+            <div class="control-group">
+                <label class="control-label" for="strategy-select">Strategy</label>
+                <select id="strategy-select" class="control-select">
+                    <option value="bald">BALD</option>
+                    <option value="entropy">Entropy</option>
+                    <option value="random">Random</option>
+                </select>
+            </div>
+            <button id="play-btn" class="btn btn--play" title="Auto-play rounds">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <polygon points="3,1 13,8 3,15"/>
+                </svg>
+            </button>
+        </div>
+        <div class="header__badge">
+            <span class="badge badge--sim">Simulated Display</span>
+        </div>
+    </header>
+
+    <!-- Main Grid: 4-panel synchronized display -->
+    <main class="grid">
+        <!-- Panel 1: False-Color / RGB View -->
+        <section class="panel" id="panel-rgb">
+            <div class="panel__header">
+                <h2 class="panel__title">
+                    <span class="panel__icon">🛰️</span>
+                    False-Color Composite
+                </h2>
+                <div class="panel__badges">
+                    <span class="badge badge--pca">PCA → RGB</span>
+                </div>
+            </div>
+            <div class="panel__canvas-wrap">
+                <canvas id="canvas-rgb" class="panel__canvas"></canvas>
+                <div class="panel__overlay" id="overlay-rgb"></div>
+            </div>
+            <div class="panel__footer">
+                <span class="stat" id="stat-resolution">—</span>
+            </div>
+        </section>
+
+        <!-- Panel 2: Segmentation Map -->
+        <section class="panel" id="panel-seg">
+            <div class="panel__header">
+                <h2 class="panel__title">
+                    <span class="panel__icon">🗺️</span>
+                    Segmentation Map
+                </h2>
+                <div class="panel__badges">
+                    <button class="badge badge--toggle" id="toggle-gt" data-active="false">
+                        GT / Pred
+                    </button>
+                </div>
+            </div>
+            <div class="panel__canvas-wrap">
+                <canvas id="canvas-seg" class="panel__canvas"></canvas>
+            </div>
+            <div class="panel__footer">
+                <span class="stat" id="stat-miou">mIoU: —</span>
+                <span class="stat" id="stat-oa">OA: —</span>
+            </div>
+        </section>
+
+        <!-- Panel 3: Uncertainty Heatmap -->
+        <section class="panel" id="panel-uncertainty">
+            <div class="panel__header">
+                <h2 class="panel__title">
+                    <span class="panel__icon">🌡️</span>
+                    Uncertainty Map
+                </h2>
+                <div class="panel__badges">
+                    <span class="badge badge--bald" id="uncertainty-type">BALD</span>
+                </div>
+            </div>
+            <div class="panel__canvas-wrap">
+                <canvas id="canvas-uncertainty" class="panel__canvas"></canvas>
+                <!-- Color scale legend -->
+                <div class="colorbar">
+                    <div class="colorbar__gradient"></div>
+                    <div class="colorbar__labels">
+                        <span>Low</span><span>High</span>
+                    </div>
+                </div>
+            </div>
+            <div class="panel__footer">
+                <span class="stat" id="stat-mean-unc">Mean: —</span>
+                <span class="stat" id="stat-max-unc">Max: —</span>
+            </div>
+        </section>
+
+        <!-- Panel 4: AL Query Locations + Metrics Chart -->
+        <section class="panel" id="panel-al">
+            <div class="panel__header">
+                <h2 class="panel__title">
+                    <span class="panel__icon">📊</span>
+                    Active Learning Progress
+                </h2>
+            </div>
+            <div class="panel__content-split">
+                <!-- Mini map with query markers -->
+                <div class="panel__minimap-wrap">
+                    <canvas id="canvas-queries" class="panel__canvas panel__canvas--mini"></canvas>
+                </div>
+                <!-- Annotation efficiency chart -->
+                <div class="panel__chart-wrap">
+                    <canvas id="chart-efficiency"></canvas>
+                </div>
+            </div>
+            <div class="panel__footer">
+                <span class="stat" id="stat-labeled">Labeled: —</span>
+                <span class="stat" id="stat-round-info">Round: 0</span>
+            </div>
+        </section>
+    </main>
+
+    <!-- Bottom Status Bar -->
+    <footer class="status-bar">
+        <div class="status-bar__left">
+            <span class="status-indicator" id="status-dot"></span>
+            <span id="status-text">Ready — Load data to begin</span>
+        </div>
+        <div class="status-bar__center">
+            <span class="status-note">
+                ⚠️ Simulated multi-panel display — NOT a physical Liquid Galaxy rig
+            </span>
+        </div>
+        <div class="status-bar__right">
+            <button class="btn btn--load" id="load-demo-btn">Load Demo Data</button>
+            <button class="btn btn--export" id="export-btn" disabled>Export View</button>
+        </div>
+    </footer>
+
+    <!-- Class Legend Overlay (togglable) -->
+    <aside class="legend-panel" id="legend-panel">
+        <h3 class="legend-panel__title">Class Legend</h3>
+        <div id="legend-items" class="legend-panel__items">
+            <!-- Populated by JS -->
+        </div>
+    </aside>
+
+    <script src="app.js"></script>
+</body>
+</html>
