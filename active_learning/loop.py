@@ -123,6 +123,9 @@ class ActiveLearningLoop:
         print(f"Rounds: {self.num_rounds}, Budget/round: {self.query_budget} pixels")
         print(f"{'='*60}\n")
 
+        # --- Move model to device before any forward passes ---
+        self.model.to(self.device)
+
         # --- Initialize labeled pool ---
         labeled_mask = self.oracle.initialize_random_labels(
             self.initial_fraction, seed=42
