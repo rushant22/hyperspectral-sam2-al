@@ -3,182 +3,293 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AL-HSI-SAM2 — Active Learning Visualization Dashboard</title>
-    <meta name="description" content="Simulated multi-panel visualization dashboard for Active-Learning Hyperspectral Invasive Species Segmentation via Adapted SAM2.">
+    <title>AL-HSI-SAM2 — Liquid Galaxy Visualization System</title>
+    <meta name="description" content="Liquid Galaxy-inspired multi-panel visualization dashboard for Active-Learning Hyperspectral Invasive Species Segmentation via Adapted SAM2.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@500;700;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <!-- Top Header Bar -->
-    <header class="header">
-        <div class="header__brand">
-            <div class="header__logo">
-                <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-                    <circle cx="14" cy="14" r="12" stroke="url(#grad)" stroke-width="2.5" fill="none"/>
-                    <circle cx="14" cy="14" r="5" fill="url(#grad)"/>
-                    <defs><linearGradient id="grad" x1="0" y1="0" x2="28" y2="28">
-                        <stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/>
-                    </linearGradient></defs>
+
+    <!-- Animated background grid -->
+    <div class="bg-grid"></div>
+    <div class="bg-glow bg-glow--1"></div>
+    <div class="bg-glow bg-glow--2"></div>
+    <div class="bg-glow bg-glow--3"></div>
+
+    <!-- ═══════════════════════════════════════════════════════
+         TOP MISSION HEADER
+    ═══════════════════════════════════════════════════════ -->
+    <header class="mission-header">
+        <div class="mission-header__left">
+            <div class="mission-logo">
+                <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+                    <circle cx="20" cy="20" r="18" stroke="url(#logoGrad)" stroke-width="1.5" fill="none" stroke-dasharray="4 2"/>
+                    <circle cx="20" cy="20" r="10" stroke="url(#logoGrad)" stroke-width="1.5" fill="none"/>
+                    <circle cx="20" cy="20" r="3" fill="url(#logoGrad)"/>
+                    <line x1="2" y1="20" x2="38" y2="20" stroke="url(#logoGrad)" stroke-width="0.8" stroke-dasharray="3 3"/>
+                    <line x1="20" y1="2" x2="20" y2="38" stroke="url(#logoGrad)" stroke-width="0.8" stroke-dasharray="3 3"/>
+                    <defs>
+                        <linearGradient id="logoGrad" x1="0" y1="0" x2="40" y2="40">
+                            <stop stop-color="#6366f1"/>
+                            <stop offset="1" stop-color="#06b6d4"/>
+                        </linearGradient>
+                    </defs>
                 </svg>
             </div>
-            <h1 class="header__title">AL-HSI-SAM2 <span class="header__subtitle">Dashboard</span></h1>
-        </div>
-        <div class="header__controls">
-            <div class="control-group">
-                <label class="control-label" for="dataset-select">Dataset</label>
-                <select id="dataset-select" class="control-select">
-                    <option value="indian_pines">Indian Pines</option>
-                    <option value="pavia">Pavia University</option>
-                </select>
+            <div class="mission-title-group">
+                <div class="mission-system-name">LIQUID GALAXY</div>
+                <h1 class="mission-title">AL-HSI-SAM2 <span class="mission-title__sub">Hyperspectral Intelligence Platform</span></h1>
             </div>
-            <div class="control-group">
-                <label class="control-label" for="round-slider">AL Round</label>
-                <div class="slider-container">
-                    <input type="range" id="round-slider" min="0" max="10" value="0" class="control-slider">
-                    <span id="round-display" class="slider-value">0</span>
+        </div>
+
+        <div class="mission-header__center">
+            <div class="mission-stats">
+                <div class="mission-stat">
+                    <span class="mission-stat__label">OA</span>
+                    <span class="mission-stat__value" id="hdr-oa">90.95%</span>
+                </div>
+                <div class="mission-stat-divider"></div>
+                <div class="mission-stat">
+                    <span class="mission-stat__label">mIoU</span>
+                    <span class="mission-stat__value" id="hdr-miou">81.51%</span>
+                </div>
+                <div class="mission-stat-divider"></div>
+                <div class="mission-stat">
+                    <span class="mission-stat__label">LABELS</span>
+                    <span class="mission-stat__value" id="hdr-labels">5.5%</span>
+                </div>
+                <div class="mission-stat-divider"></div>
+                <div class="mission-stat">
+                    <span class="mission-stat__label">SAVINGS</span>
+                    <span class="mission-stat__value accent-green">94.5%</span>
                 </div>
             </div>
-            <div class="control-group">
-                <label class="control-label" for="strategy-select">Strategy</label>
-                <select id="strategy-select" class="control-select">
-                    <option value="bald">BALD</option>
-                    <option value="entropy">Entropy</option>
-                    <option value="random">Random</option>
-                </select>
-            </div>
-            <button id="play-btn" class="btn btn--play" title="Auto-play rounds">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <polygon points="3,1 13,8 3,15"/>
-                </svg>
-            </button>
         </div>
-        <div class="header__badge">
-            <span class="badge badge--sim">Simulated Display</span>
+
+        <div class="mission-header__right">
+            <div class="header-controls">
+                <div class="control-pill">
+                    <label class="control-pill__label">DATASET</label>
+                    <select id="dataset-select" class="control-pill__select">
+                        <option value="pavia">Pavia University</option>
+                        <option value="indian_pines">Indian Pines</option>
+                    </select>
+                </div>
+                <div class="control-pill">
+                    <label class="control-pill__label">STRATEGY</label>
+                    <select id="strategy-select" class="control-pill__select">
+                        <option value="bald">BALD</option>
+                        <option value="entropy">Entropy</option>
+                        <option value="random">Random</option>
+                    </select>
+                </div>
+            </div>
+            <div class="sim-badge">⬡ SIMULATED DISPLAY</div>
         </div>
     </header>
 
-    <!-- Main Grid: 4-panel synchronized display -->
-    <main class="grid">
-        <!-- Panel 1: False-Color / RGB View -->
-        <section class="panel" id="panel-rgb">
-            <div class="panel__header">
-                <h2 class="panel__title">
-                    <span class="panel__icon">🛰️</span>
-                    False-Color Composite
-                </h2>
-                <div class="panel__badges">
-                    <span class="badge badge--pca">PCA → RGB</span>
+    <!-- ═══════════════════════════════════════════════════════
+         AL ROUND TIMELINE BAR
+    ═══════════════════════════════════════════════════════ -->
+    <div class="timeline-bar">
+        <div class="timeline-bar__inner">
+            <button id="play-btn" class="timeline-btn timeline-btn--play" title="Auto-play rounds">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,1 13,8 3,15"/></svg>
+            </button>
+            <span class="timeline-label">ROUND</span>
+            <div class="timeline-track">
+                <input type="range" id="round-slider" min="0" max="10" value="0" class="timeline-slider">
+                <div class="timeline-pip-row" id="timeline-pips"></div>
+            </div>
+            <span class="timeline-round-badge" id="round-display">0 / 10</span>
+            <div class="timeline-separator"></div>
+            <button id="load-btn" class="timeline-btn timeline-btn--load" title="Load data">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1v8M4 6l4 4 4-4M1 12v2a1 1 0 001 1h12a1 1 0 001-1v-2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
+                Load Data
+            </button>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════
+         MAIN 4-PANEL GRID
+    ═══════════════════════════════════════════════════════ -->
+    <main class="panel-grid">
+
+        <!-- Panel 1: False-Color Composite -->
+        <section class="lg-panel" id="panel-rgb">
+            <div class="lg-panel__frame">
+                <div class="lg-panel__corner lg-panel__corner--tl"></div>
+                <div class="lg-panel__corner lg-panel__corner--tr"></div>
+                <div class="lg-panel__corner lg-panel__corner--bl"></div>
+                <div class="lg-panel__corner lg-panel__corner--br"></div>
+            </div>
+            <div class="lg-panel__header">
+                <div class="lg-panel__header-left">
+                    <span class="panel-icon">🛰️</span>
+                    <span class="panel-title">False-Color Composite</span>
+                </div>
+                <div class="lg-panel__header-right">
+                    <span class="panel-tag">PCA → RGB</span>
+                    <span class="panel-tag panel-tag--dim" id="stat-resolution">— × —</span>
                 </div>
             </div>
-            <div class="panel__canvas-wrap">
-                <canvas id="canvas-rgb" class="panel__canvas"></canvas>
-                <div class="panel__overlay" id="overlay-rgb"></div>
+            <div class="lg-panel__canvas-area">
+                <canvas id="canvas-rgb" class="lg-canvas"></canvas>
+                <div class="canvas-placeholder" id="ph-rgb">
+                    <div class="placeholder-spinner"></div>
+                    <span>Awaiting spectral data…</span>
+                </div>
             </div>
-            <div class="panel__footer">
-                <span class="stat" id="stat-resolution">—</span>
+            <div class="lg-panel__scanline"></div>
+            <div class="lg-panel__footer">
+                <span class="footer-stat">103 bands</span>
+                <span class="footer-stat">ROSIS sensor</span>
+                <span class="footer-stat footer-stat--live" id="rgb-status">IDLE</span>
             </div>
         </section>
 
         <!-- Panel 2: Segmentation Map -->
-        <section class="panel" id="panel-seg">
-            <div class="panel__header">
-                <h2 class="panel__title">
-                    <span class="panel__icon">🗺️</span>
-                    Segmentation Map
-                </h2>
-                <div class="panel__badges">
-                    <button class="badge badge--toggle" id="toggle-gt" data-active="false">
-                        GT / Pred
+        <section class="lg-panel" id="panel-seg">
+            <div class="lg-panel__frame">
+                <div class="lg-panel__corner lg-panel__corner--tl"></div>
+                <div class="lg-panel__corner lg-panel__corner--tr"></div>
+                <div class="lg-panel__corner lg-panel__corner--bl"></div>
+                <div class="lg-panel__corner lg-panel__corner--br"></div>
+            </div>
+            <div class="lg-panel__header">
+                <div class="lg-panel__header-left">
+                    <span class="panel-icon">🗺️</span>
+                    <span class="panel-title">Segmentation Map</span>
+                </div>
+                <div class="lg-panel__header-right">
+                    <button class="toggle-btn" id="toggle-gt">
+                        <span class="toggle-btn__track">
+                            <span class="toggle-btn__thumb"></span>
+                        </span>
+                        <span id="toggle-gt-label">GT</span>
                     </button>
                 </div>
             </div>
-            <div class="panel__canvas-wrap">
-                <canvas id="canvas-seg" class="panel__canvas"></canvas>
+            <div class="lg-panel__canvas-area">
+                <canvas id="canvas-seg" class="lg-canvas"></canvas>
+                <div class="canvas-placeholder" id="ph-seg">
+                    <div class="placeholder-spinner"></div>
+                    <span>Awaiting segmentation…</span>
+                </div>
+                <!-- Floating class legend -->
+                <div class="legend-float" id="legend-float">
+                    <div class="legend-float__title">CLASSES</div>
+                    <div id="legend-items"></div>
+                </div>
             </div>
-            <div class="panel__footer">
-                <span class="stat" id="stat-miou">mIoU: —</span>
-                <span class="stat" id="stat-oa">OA: —</span>
+            <div class="lg-panel__scanline"></div>
+            <div class="lg-panel__footer">
+                <span class="footer-stat" id="stat-miou">mIoU: —</span>
+                <span class="footer-stat" id="stat-oa">OA: —</span>
+                <span class="footer-stat footer-stat--live" id="seg-status">IDLE</span>
             </div>
         </section>
 
         <!-- Panel 3: Uncertainty Heatmap -->
-        <section class="panel" id="panel-uncertainty">
-            <div class="panel__header">
-                <h2 class="panel__title">
-                    <span class="panel__icon">🌡️</span>
-                    Uncertainty Map
-                </h2>
-                <div class="panel__badges">
-                    <span class="badge badge--bald" id="uncertainty-type">BALD</span>
+        <section class="lg-panel" id="panel-uncertainty">
+            <div class="lg-panel__frame">
+                <div class="lg-panel__corner lg-panel__corner--tl"></div>
+                <div class="lg-panel__corner lg-panel__corner--tr"></div>
+                <div class="lg-panel__corner lg-panel__corner--bl"></div>
+                <div class="lg-panel__corner lg-panel__corner--br"></div>
+            </div>
+            <div class="lg-panel__header">
+                <div class="lg-panel__header-left">
+                    <span class="panel-icon">🌡️</span>
+                    <span class="panel-title">Uncertainty Heatmap</span>
+                </div>
+                <div class="lg-panel__header-right">
+                    <span class="panel-tag panel-tag--hot" id="uncertainty-type">BALD</span>
                 </div>
             </div>
-            <div class="panel__canvas-wrap">
-                <canvas id="canvas-uncertainty" class="panel__canvas"></canvas>
-                <!-- Color scale legend -->
-                <div class="colorbar">
-                    <div class="colorbar__gradient"></div>
-                    <div class="colorbar__labels">
+            <div class="lg-panel__canvas-area">
+                <canvas id="canvas-uncertainty" class="lg-canvas"></canvas>
+                <div class="canvas-placeholder" id="ph-unc">
+                    <div class="placeholder-spinner"></div>
+                    <span>Awaiting uncertainty…</span>
+                </div>
+                <!-- Inferno color scale bar -->
+                <div class="colorbar-float">
+                    <div class="colorbar-float__gradient"></div>
+                    <div class="colorbar-float__labels">
                         <span>Low</span><span>High</span>
                     </div>
                 </div>
             </div>
-            <div class="panel__footer">
-                <span class="stat" id="stat-mean-unc">Mean: —</span>
-                <span class="stat" id="stat-max-unc">Max: —</span>
+            <div class="lg-panel__scanline"></div>
+            <div class="lg-panel__footer">
+                <span class="footer-stat" id="stat-mean-unc">Mean: —</span>
+                <span class="footer-stat" id="stat-max-unc">Max: —</span>
+                <span class="footer-stat footer-stat--live" id="unc-status">IDLE</span>
             </div>
         </section>
 
-        <!-- Panel 4: AL Query Locations + Metrics Chart -->
-        <section class="panel" id="panel-al">
-            <div class="panel__header">
-                <h2 class="panel__title">
-                    <span class="panel__icon">📊</span>
-                    Active Learning Progress
-                </h2>
+        <!-- Panel 4: Active Learning Progress -->
+        <section class="lg-panel" id="panel-al">
+            <div class="lg-panel__frame">
+                <div class="lg-panel__corner lg-panel__corner--tl"></div>
+                <div class="lg-panel__corner lg-panel__corner--tr"></div>
+                <div class="lg-panel__corner lg-panel__corner--bl"></div>
+                <div class="lg-panel__corner lg-panel__corner--br"></div>
             </div>
-            <div class="panel__content-split">
-                <!-- Mini map with query markers -->
-                <div class="panel__minimap-wrap">
-                    <canvas id="canvas-queries" class="panel__canvas panel__canvas--mini"></canvas>
+            <div class="lg-panel__header">
+                <div class="lg-panel__header-left">
+                    <span class="panel-icon">📊</span>
+                    <span class="panel-title">Active Learning Progress</span>
+                </div>
+                <div class="lg-panel__header-right">
+                    <span class="panel-tag" id="stat-labeled">Labels: —</span>
+                </div>
+            </div>
+            <div class="lg-panel__al-split">
+                <!-- Mini query map -->
+                <div class="al-minimap-wrap">
+                    <div class="al-minimap-label">QUERY MAP</div>
+                    <canvas id="canvas-queries" class="al-minimap-canvas"></canvas>
+                    <div class="canvas-placeholder canvas-placeholder--mini" id="ph-queries">
+                        <span>No queries</span>
+                    </div>
                 </div>
                 <!-- Annotation efficiency chart -->
-                <div class="panel__chart-wrap">
-                    <canvas id="chart-efficiency"></canvas>
+                <div class="al-chart-wrap">
+                    <div class="al-chart-label">ANNOTATION EFFICIENCY</div>
+                    <canvas id="chart-efficiency" class="al-chart-canvas"></canvas>
                 </div>
             </div>
-            <div class="panel__footer">
-                <span class="stat" id="stat-labeled">Labeled: —</span>
-                <span class="stat" id="stat-round-info">Round: 0</span>
+            <div class="lg-panel__scanline"></div>
+            <div class="lg-panel__footer">
+                <span class="footer-stat" id="stat-round-info">Round: 0 / 10</span>
+                <span class="footer-stat" id="stat-advantage">Advantage: —</span>
+                <span class="footer-stat footer-stat--live" id="al-status">IDLE</span>
             </div>
         </section>
+
     </main>
 
-    <!-- Bottom Status Bar -->
-    <footer class="status-bar">
-        <div class="status-bar__left">
-            <span class="status-indicator" id="status-dot"></span>
-            <span id="status-text">Ready — Load data to begin</span>
+    <!-- ═══════════════════════════════════════════════════════
+         BOTTOM STATUS BAR
+    ═══════════════════════════════════════════════════════ -->
+    <footer class="status-footer">
+        <div class="status-footer__left">
+            <span class="status-dot" id="status-dot"></span>
+            <span class="status-text" id="status-text">System ready — click Load Data to begin</span>
         </div>
-        <div class="status-bar__center">
-            <span class="status-note">
-                ⚠️ Simulated multi-panel display — NOT a physical Liquid Galaxy rig
+        <div class="status-footer__center">
+            <span class="status-coords">
+                📍 Pavia, Italy &nbsp;|&nbsp; 45.18°N, 9.16°E &nbsp;|&nbsp; ROSIS · 1.3m GSD
             </span>
         </div>
-        <div class="status-bar__right">
-            <button class="btn btn--load" id="load-demo-btn">Load Demo Data</button>
-            <button class="btn btn--export" id="export-btn" disabled>Export View</button>
+        <div class="status-footer__right">
+            <span class="status-note">⬡ Simulated Multi-Panel Display · Not a Physical Liquid Galaxy Rig</span>
         </div>
     </footer>
-
-    <!-- Class Legend Overlay (togglable) -->
-    <aside class="legend-panel" id="legend-panel">
-        <h3 class="legend-panel__title">Class Legend</h3>
-        <div id="legend-items" class="legend-panel__items">
-            <!-- Populated by JS -->
-        </div>
-    </aside>
 
     <script src="app.js"></script>
 </body>
