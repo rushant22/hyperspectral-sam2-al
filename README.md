@@ -11,6 +11,23 @@ learning.
 > not yet publicly available — the framework is designed to be species-agnostic
 > and transferable when such data becomes accessible.
 
+---
+
+## Key Results
+
+| Metric | Value |
+|--------|-------|
+| **Full Supervised Accuracy** | 90.95% OA / 81.51% mIoU (Pavia University) |
+| **Active Learning (Entropy, 10 rounds)** | 74.74% mIoU with only 5.5% labels |
+| **Annotation Savings** | 94.5% fewer labels vs. full supervision |
+| **Active vs. Random Advantage** | +8.87% mIoU at round 10 |
+| **Adapter Contribution** | +79.19% mIoU over no-adapter baseline |
+| **Best Spectral Query Count** | M=8 queries → 82.35% mIoU / 92.20% OA |
+
+See [RESULTS_SUMMARY.md](documentation/RESULTS_SUMMARY.md) for complete tables and analysis.
+
+---
+
 ## Quick Start
 
 ### 1. Environment Setup
@@ -66,26 +83,88 @@ python scripts/run_al_loop.py --config configs/default.yaml
 python scripts/run_ablations.py --config configs/default.yaml
 ```
 
+### 8. Generate Publication Figures
+
+```bash
+python evaluation/plots.py
+```
+
+---
+
+## Visualization Dashboard
+
+An interactive multi-panel web dashboard is included at `visualization/dashboard/`:
+
+```bash
+# Open directly in your browser:
+# Simply double-click visualization/dashboard/index.html
+# Or serve locally:
+python -m http.server 8000 --directory visualization/dashboard
+# Then open http://localhost:8000
+```
+
+The dashboard displays:
+- **False-color composite** (PCA → RGB)
+- **Segmentation map** (ground truth / predicted, toggleable)
+- **Uncertainty heatmap** (BALD/entropy, inferno colormap)
+- **AL query locations** + annotation-efficiency chart
+
+> **Note:** The dashboard runs with synthetic demo data out-of-the-box. To load
+> real experiment results, run `python visualization/export_results.py` after
+> training to generate the JSON data files.
+
+---
+
 ## Project Structure
 
 ```
 CP/
-├── configs/          # YAML hyperparameter configs
-├── data/             # Dataset download, loaders, transforms
-├── models/           # Spectral adapter, LoRA, SAM2 wrapper, losses
-├── active_learning/  # Uncertainty estimation, query strategies, AL loop
-├── evaluation/       # Metrics (mIoU) and plotting
-├── visualization/    # Web dashboard (simulated multi-panel display)
-├── scripts/          # Training and experiment entry points
-└── paper/            # IEEE-format paper and generated figures
+├── configs/              # YAML hyperparameter configs
+│   └── default.yaml      # Main experiment configuration
+├── data/                 # Dataset download, loaders, transforms
+│   ├── download.py       # Auto-download Indian Pines & Pavia University
+│   ├── hsi_dataset.py    # PyTorch Dataset for HSI patches
+│   └── transforms.py     # PCA, normalization, augmentation
+├── models/               # Core model components
+│   ├── spectral_adapter.py  # Spectral Cross-Attention Adapter (M queries)
+│   ├── sam2_wrapper.py      # AdaptedSAM2 wrapper (backbone + adapter + head)
+│   ├── lora.py              # LoRA injection for Hiera attention layers
+│   └── losses.py            # Focal + Dice combined loss
+├── active_learning/      # Uncertainty-driven query strategies
+│   ├── loop.py           # Main AL training loop
+│   ├── uncertainty.py    # BALD & Shannon entropy estimation (MC-Dropout)
+│   └── strategies.py     # Query strategy implementations
+├── evaluation/           # Metrics and plotting
+│   ├── metrics.py        # mIoU, per-class IoU, OA computation
+│   └── plots.py          # Publication figure generation
+├── visualization/        # Web dashboard (simulated multi-panel display)
+│   └── dashboard/        # HTML + CSS + JS interactive dashboard
+├── scripts/              # Training and experiment entry points
+│   ├── train_baseline.py
+│   ├── train_adapter.py
+│   ├── run_al_loop.py
+│   └── run_ablations.py
+├── documentation/        # Project documentation
+│   ├── AL_HSI_SAM2_Project_Documentation.docx
+│   └── RESULTS_SUMMARY.md
+├── paper/                # IEEE-format paper and generated figures
+│   └── figures/          # 4 publication-ready PNG figures
+├── notebooks/            # Colab execution notebook
+│   └── colab_runner.ipynb
+├── requirements.txt      # Python dependencies
+└── README.md             # This file
 ```
+
+---
 
 ## Datasets
 
-| Dataset | Bands | Size | Classes | Source |
-|---------|-------|------|---------|--------|
+| Dataset | Bands | Spatial Size | Classes | Source |
+|---------|:-----:|:------------:|:-------:|--------|
 | Indian Pines | 200 | 145×145 | 16 | [EHU](https://www.ehu.eus/ccwintco/index.php/Hyperspectral_Remote_Sensing_Scenes) |
 | Pavia University | 103 | 610×340 | 9 | [EHU](https://www.ehu.eus/ccwintco/index.php/Hyperspectral_Remote_Sensing_Scenes) |
+
+---
 
 ## Key Design Decisions
 
@@ -95,11 +174,15 @@ CP/
 - **Active Learning**: BALD (via MC-Dropout, T=10 passes) + BADGE-inspired spatial diversity selection
 - **Loss**: Focal (γ=2) + Dice, equally weighted
 
+---
+
 ## Reproducibility
 
 Every number in the paper comes from running the scripts above. Set
 `seed: 42` in the config (default) for deterministic results. GPU
 non-determinism may cause minor (<0.5% mIoU) variation across runs.
+
+---
 
 ## Citation
 

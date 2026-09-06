@@ -23,6 +23,9 @@ results/
 *.partial
 *.log
 
+# Verification workspace (one-off audit scripts)
+verification_workspace/
+
 # IDE & OS files
 .vscode/
 .idea/
