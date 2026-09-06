@@ -1,0 +1,98 @@
+# =============================================================================
+# Indian Pines Configuration — AL-HSI-SAM2
+# =============================================================================
+# Overrides for the Indian Pines (AVIRIS) benchmark.
+# Run: python scripts/train_adapter.py --config configs/indian_pines.yaml
+# Run: python scripts/run_al_loop.py --config configs/indian_pines.yaml
+
+seed: 42
+
+dataset:
+  name: "indian_pines"
+  root_dir: "./datasets"
+  # Indian Pines is 145x145 — no tiling needed, treat as single patch
+  patch_size: 145
+  patch_overlap: 0.0
+  sam2_input_size: 256          # upsample to 256 for SAM2
+  train_ratio: 0.6
+  val_ratio: 0.2
+  test_ratio: 0.2
+  pca_components: 3
+  normalization: "per_band"
+
+# SAM2 backbone — same checkpoint as Pavia
+sam2:
+  checkpoint: "./checkpoints/sam2.1_hiera_base_plus.pt"
+  model_cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"
+  freeze_image_encoder: true
+  freeze_prompt_encoder: true
+  embed_dim: 256
+
+lora:
+  enabled: true
+  rank: 8
+  alpha: 16
+  target_modules: ["q_proj", "v_proj"]
+  dropout: 0.1
+  adapt_mask_decoder: false
+
+adapter:
+  enabled: true
+  num_queries: 12
+  d_model: 256
+  num_heads: 8
+  ffn_dim: 512
+  dropout: 0.1
+  use_residual: true
+
+seg_head:
+  type: "conv1x1"
+  hidden_dim: 128
+
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  focal_gamma: 2.0
+  focal_alpha: null              # auto-compute from class frequencies (important for IP)
+  dice_smooth: 1.0
+
+training:
+  epochs: 100
+  batch_size: 2                  # smaller: IP is single large image, needs memory
+  learning_rate: 1.0e-4
+  decoder_lr: 5.0e-5
+  weight_decay: 0.01
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 5
+  grad_clip_norm: 1.0
+  early_stopping_patience: 15
+  use_amp: true
+  grad_accumulation_steps: 2    # effective batch = 4
+  device: "cuda"
+
+active_learning:
+  enabled: true
+  initial_labeled_fraction: 0.05
+  num_rounds: 10
+  query_fraction_per_round: 0.02
+  mc_dropout_passes: 10
+  strategy: "bald"
+  use_spatial_diversity: true
+  diversity_clusters: 30
+  # IMPORTANT: set ndvi_threshold to 0 for Indian Pines
+  # IP is agricultural — ALL pixels are relevant, NDVI mask not needed
+  ndvi_threshold: 0.0
+  ndvi_red_band: null
+  ndvi_nir_band: null
+  retrain_epochs: 50
+
+evaluation:
+  metrics: ["miou", "per_class_iou", "overall_accuracy", "kappa"]
+  save_predictions: true
+  output_dir: "./results_indian_pines"   # separate output dir
+
+visualization:
+  entropy_high: 0.8
+  entropy_mid: 0.5
+  entropy_low: 0.3

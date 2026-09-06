@@ -645,42 +645,51 @@ function generateDemoData(dataset = "pavia") {
 // Data Loading — tries real JSON first, falls back to demo
 // ============================================================================
 async function loadData() {
-    setStatus('Loading data…', 'loading');
+    setStatus('Loading data...', 'loading');
 
-    try {
-        const dir = 'data/';
-        const [fcRes, uncRes, segRes, qhRes, metRes] = await Promise.all([
-            fetch(dir + 'false_color.json'),
-            fetch(dir + 'uncertainty_map.json'),
-            fetch(dir + 'segmentation_map.json'),
-            fetch(dir + 'query_history.json'),
-            fetch(dir + 'metrics_summary.json'),
-        ]);
+    // Try dataset-specific subfolder first, then fall back to flat data/ folder
+    const ds = state.dataset;          // 'pavia' or 'indian_pines'
+    const dirs = [`data/${ds}/`, 'data/'];
 
-        if (fcRes.ok && uncRes.ok && segRes.ok && qhRes.ok && metRes.ok) {
-            state.falseColor   = await fcRes.json();
-            state.uncertainty  = await uncRes.json();
-            state.segmentation = await segRes.json();
-            state.queryHistory = await qhRes.json();
-            state.metrics      = await metRes.json();
+    let loaded = false;
+    for (const dir of dirs) {
+        try {
+            const [fcRes, uncRes, segRes, qhRes, metRes] = await Promise.all([
+                fetch(dir + 'false_color.json'),
+                fetch(dir + 'uncertainty_map.json'),
+                fetch(dir + 'segmentation_map.json'),
+                fetch(dir + 'query_history.json'),
+                fetch(dir + 'metrics_summary.json'),
+            ]);
 
-            state.maxRound = state.queryHistory.length;
-            roundSlider.max = state.maxRound;
+            if (fcRes.ok && uncRes.ok && segRes.ok && qhRes.ok && metRes.ok) {
+                state.falseColor   = await fcRes.json();
+                state.uncertainty  = await uncRes.json();
+                state.segmentation = await segRes.json();
+                state.queryHistory = await qhRes.json();
+                state.metrics      = await metRes.json();
 
-            // Set class colors based on loaded dataset
-            state.classColors = state.dataset === 'pavia' ? CLASS_COLORS_PV : CLASS_COLORS_IP;
-            state.classNames  = state.dataset === 'pavia' ? CLASS_NAMES_PV  : CLASS_NAMES_IP;
+                state.maxRound = state.queryHistory.length;
+                roundSlider.max = state.maxRound;
 
-            state.isRealData = true;
-            setStatus('✅ Real experiment data loaded — Pavia University', 'ready');
-        } else {
-            throw new Error('Missing one or more data files');
-        }
-    } catch (e) {
+                state.classColors = ds === 'pavia' ? CLASS_COLORS_PV : CLASS_COLORS_IP;
+                state.classNames  = ds === 'pavia' ? CLASS_NAMES_PV  : CLASS_NAMES_IP;
+
+                const dsLabel = ds === 'pavia' ? 'Pavia University' : 'Indian Pines';
+                state.isRealData = true;
+                setStatus('Real experiment data loaded — ' + dsLabel, 'ready');
+                loaded = true;
+                break;
+            }
+        } catch (_) { /* try next dir */ }
+    }
+
+    if (!loaded) {
         // Fall back to high-quality demo with real numbers
         generateDemoData(state.dataset);
         setStatus(
-            '⚠️ Real data not found — showing demo with actual result numbers. Run scripts/generate_dashboard_data.py on Colab to load real data.',
+            'Real data not found — showing demo with actual result numbers. '
+            + 'Run scripts/generate_dashboard_data.py on Colab to load real data.',
             'idle'
         );
     }
@@ -700,16 +709,14 @@ roundSlider.addEventListener('input', () => {
     setRound(parseInt(roundSlider.value));
 });
 
-// Dataset change
+// Dataset change — reload data for the new dataset
 datasetSelect.addEventListener('change', () => {
     state.dataset = datasetSelect.value;
-    // Update class info
     state.classColors = state.dataset === 'pavia' ? CLASS_COLORS_PV : CLASS_COLORS_IP;
     state.classNames  = state.dataset === 'pavia' ? CLASS_NAMES_PV  : CLASS_NAMES_IP;
-    if (!state.isRealData) {
-        generateDemoData(state.dataset);
-        renderAll();
-    }
+    state.round = 0;
+    // Reload real data (or demo) for the newly selected dataset
+    loadData();
 });
 
 // Strategy change
