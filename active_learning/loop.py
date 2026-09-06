@@ -106,8 +106,10 @@ class ActiveLearningLoop:
         }
 
         # Compute number of query pixels per round
-        n_non_bg = (full_labels > 0).sum().item()
-        self.query_budget = max(1, int(n_non_bg * self.query_fraction))
+        # Use ALL labeled (non-background) pixels, not just vegetation, to
+        # avoid the query budget being 0 when the vegetation mask is too strict.
+        n_total = full_labels.numel()
+        self.query_budget = max(10, int(n_total * self.query_fraction))
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -163,15 +165,28 @@ class ActiveLearningLoop:
             # Step 5: Evaluate on test set
             metrics = self._evaluate_on_test()
 
-            # Step 6: Log results
+            # Step 6: Save per-round checkpoint (so training can resume)
+            ckpt_path = os.path.join(
+                self.output_dir,
+                f"al_{self.strategy}_round{round_idx:02d}.pt"
+            )
+            torch.save(
+                {"model_state_dict": self.model.state_dict(),
+                 "round": round_idx, "labeled_count": self.oracle.total_labeled},
+                ckpt_path,
+            )
+
+            # Step 7: Log results (including query coordinates for dashboard)
+            coords_list = query_coords.tolist() if len(query_coords) > 0 else []
             round_result = {
                 "round": round_idx,
                 "labeled_count": self.oracle.total_labeled,
                 "num_new_labels": oracle_result["num_new"],
                 "miou": metrics["miou"],
                 "per_class_iou": metrics["per_class_iou"],
-                "mean_entropy": uncertainty["entropy"].mean().item(),
-                "mean_bald": uncertainty["bald"].mean().item(),
+                "mean_entropy": float(uncertainty["entropy"].mean()),
+                "mean_bald": float(uncertainty["bald"].mean()),
+                "query_coords": coords_list,          # for dashboard
             }
             self.results["rounds"].append(round_result)
 
@@ -272,14 +287,31 @@ class ActiveLearningLoop:
         labeled_mask: torch.Tensor,
         round_idx: int,
     ) -> torch.Tensor:
-        """Select pixels to query based on the configured strategy."""
+        """
+        Select pixels to query based on the configured strategy.
+
+        Vegetation-mask fallback: if the NDVI mask leaves fewer than
+        `query_budget` candidates, we fall back to all unlabeled pixels
+        so the AL loop never stalls at 0 new labels.
+        """
+
+        # Check how many vegetation+unlabeled pixels are available
+        veg = self.vegetation_mask
+        if veg is not None:
+            n_veg_unlabeled = (veg & (~labeled_mask)).sum().item()
+            if n_veg_unlabeled < self.query_budget:
+                print(f"  [AL] WARNING: vegetation mask leaves only "
+                      f"{n_veg_unlabeled} candidates "
+                      f"(budget={self.query_budget}). "
+                      f"Falling back to all unlabeled pixels.")
+                veg = None  # ignore vegetation mask for this round
 
         if self.strategy == "random":
             return random_query(
                 num_pixels=self.query_budget,
                 total_pixels=labeled_mask.numel(),
                 labeled_mask=labeled_mask,
-                vegetation_mask=self.vegetation_mask,
+                vegetation_mask=veg,
                 seed=42 + round_idx,
             )
 
@@ -306,14 +338,14 @@ class ActiveLearningLoop:
                 num_pixels=self.query_budget,
                 num_clusters=self.diversity_clusters,
                 labeled_mask=labeled_mask,
-                vegetation_mask=self.vegetation_mask,
+                vegetation_mask=veg,
             )
         else:
             return uncertainty_query(
                 uncertainty_scores=scores,
                 num_pixels=self.query_budget,
                 labeled_mask=labeled_mask,
-                vegetation_mask=self.vegetation_mask,
+                vegetation_mask=veg,
             )
 
     def _evaluate_on_test(self) -> Dict:

@@ -259,8 +259,8 @@ def load_al_results():
 def generate_query_history(gt, al_results, scale):
     """
     Generate query coordinates from AL results.
-    Since the real AL results don't store pixel coordinates,
-    we simulate them based on high-uncertainty regions (spatially coherent).
+    Prefers real query_coords stored in each round (from the fixed loop.py).
+    Falls back to sampling from GT pixels if not available.
     """
     H, W = gt.shape
     query_history = []
@@ -276,14 +276,25 @@ def generate_query_history(gt, al_results, scale):
         num_new = rd.get("num_new_labels", 50)
         round_num = rd.get("round", 1)
 
-        # Generate spatially plausible query coordinates
-        # Bias toward labeled (non-background) regions
-        labeled_ys, labeled_xs = np.where(gt > 0)
-        if len(labeled_ys) > 0:
-            idx = rng.choice(len(labeled_ys), min(num_new, len(labeled_ys)), replace=False)
-            coords = list(zip(labeled_ys[idx].tolist(), labeled_xs[idx].tolist()))
+        # Prefer real stored query coordinates (from fixed loop.py)
+        if "query_coords" in rd and len(rd["query_coords"]) > 0:
+            # Scale coordinates to match downsampled image
+            raw_coords = rd["query_coords"]
+            coords = [
+                [int(c[0] * scale), int(c[1] * scale)]
+                for c in raw_coords
+                if int(c[0] * scale) < H and int(c[1] * scale) < W
+            ]
         else:
-            coords = [[rng.randint(0, H), rng.randint(0, W)] for _ in range(num_new)]
+            # Fallback: sample from labeled (non-background) regions
+            labeled_ys, labeled_xs = np.where(gt > 0)
+            if len(labeled_ys) > 0:
+                n = min(max(num_new, 10), len(labeled_ys))
+                idx = rng.choice(len(labeled_ys), n, replace=False)
+                coords = list(zip(labeled_ys[idx].tolist(), labeled_xs[idx].tolist()))
+            else:
+                coords = [[rng.randint(0, H), rng.randint(0, W)]
+                          for _ in range(max(num_new, 10))]
 
         query_history.append({
             "round": round_num,

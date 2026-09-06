@@ -397,11 +397,23 @@ def main():
 
     # --- Save training log ---
     log_path = os.path.join(cfg["evaluation"]["output_dir"], "adapter_training_log.json")
+    # Build per-epoch list with standardized keys for dashboard compatibility
+    epochs_log = []
+    for entry in training_log:
+        epochs_log.append({
+            "epoch":      entry.get("epoch", 0),
+            "train_loss": entry.get("loss", 0.0),
+            "val_miou":   entry.get("miou", 0.0),
+            "val_oa":     entry.get("oa", 0.0),
+            "val_kappa":  entry.get("kappa", 0.0),
+            "time":       entry.get("time", 0.0),
+        })
     with open(log_path, "w") as f:
         json.dump({
             "config": cfg,
             "param_info": param_info,
-            "training_log": training_log,
+            "epochs": epochs_log,          # dashboard-compatible key
+            "training_log": training_log,  # legacy key (kept for backwards compat)
             "test_metrics": {k: v for k, v in test_metrics.items() if k != "per_class_iou"},
             "per_class_iou": {str(k): v for k, v in test_metrics["per_class_iou"].items()},
             "total_training_time_seconds": total_time,

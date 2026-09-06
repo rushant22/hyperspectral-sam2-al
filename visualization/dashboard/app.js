@@ -331,7 +331,7 @@ function renderQueryMap() {
     canvasQueries.width = width; canvasQueries.height = height;
     const ctx = canvasQueries.getContext('2d');
 
-    // Dimmed background
+    // Dimmed background from false-color
     const img = ctx.createImageData(width, height);
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
@@ -345,25 +345,29 @@ function renderQueryMap() {
     }
     ctx.putImageData(img, 0, 0);
 
-    // Query dots
+    // Query dots up to current round
     const numRounds = Math.min(state.round, state.queryHistory.length);
     for (let r = 0; r < numRounds; r++) {
         const rd = state.queryHistory[r];
         ctx.fillStyle = ROUND_COLORS[r % ROUND_COLORS.length];
         ctx.globalAlpha = 0.9;
         for (const coord of rd.coordinates) {
-            const [row, col] = coord;
-            ctx.beginPath();
-            ctx.arc(col, row, 1.8, 0, Math.PI * 2);
-            ctx.fill();
+            // Support both [row, col] arrays and {row, col} objects
+            const row = Array.isArray(coord) ? coord[0] : coord.row;
+            const col = Array.isArray(coord) ? coord[1] : coord.col;
+            if (row >= 0 && row < height && col >= 0 && col < width) {
+                ctx.beginPath();
+                ctx.arc(col, row, 1.8, 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
     }
     ctx.globalAlpha = 1.0;
 
-    // Labeled count
+    // Stats
     const rd = getCurrentRoundMetrics();
     if (rd) {
-        $('#stat-labeled').textContent  = `Labels: ${rd.labeled_count?.toLocaleString() || '—'}`;
+        $('#stat-labeled').textContent   = `Labels: ${rd.labeled_count?.toLocaleString() || '—'}`;
         $('#stat-round-info').textContent = `Round: ${state.round} / ${state.maxRound}`;
     }
 

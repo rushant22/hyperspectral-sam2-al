@@ -215,10 +215,20 @@ def ablation_lora_rank(base_cfg: dict) -> dict:
     print("\n=== Ablation: LoRA Rank ===")
     results = {}
 
+    output_dir = base_cfg["evaluation"]["output_dir"]
+    best_ckpt = os.path.join(output_dir, "adapter_best.pt")
+
     for rank in [4, 8, 16]:
         cfg = copy.deepcopy(base_cfg)
         cfg["lora"]["rank"] = rank
         cfg["lora"]["alpha"] = rank * 2  # Keep alpha/rank = 2
+
+        # IMPORTANT: remove the existing best checkpoint so this variant
+        # cannot accidentally load weights trained at a different rank.
+        # Each call to quick_train_eval trains from scratch.
+        if os.path.exists(best_ckpt):
+            os.remove(best_ckpt)
+
         results[f"rank_{rank}"] = quick_train_eval(cfg, f"r={rank}")
 
     return results
