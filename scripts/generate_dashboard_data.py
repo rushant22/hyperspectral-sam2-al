@@ -18,6 +18,8 @@ Usage:
 import os
 import sys
 import json
+import argparse
+import yaml
 import numpy as np
 import scipy.io as sio
 import torch
@@ -120,35 +122,37 @@ def make_false_color(data):
     return rgb.astype(np.uint8), pca
 
 
-def run_model_inference(data, gt, pca_model):
+def run_model_inference(data, gt, pca_model, checkpoint_path=None, num_classes=10):
     """
     Run model inference to get predictions and uncertainty.
     If model loading fails (no SAM2 etc.), fall back to PCA-based proxy.
     """
     H, W, B = data.shape
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    checkpoint_path = checkpoint_path or CHECKPOINT_PATH
 
     # Try loading the real trained model
     try:
         from models.sam2_wrapper import AdaptedSAM2
 
-        print("[Model] Attempting to load trained model...")
-        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+        print(f"[Model] Attempting to load trained model from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
         # Build model
         model = AdaptedSAM2(
             num_bands=B,
-            num_classes=10,  # Pavia has 10 classes (0-9)
+            num_classes=num_classes,
             sam2_checkpoint=os.path.join(PROJECT_ROOT, "checkpoints", "sam2.1_hiera_base_plus.pt"),
             sam2_model_cfg="configs/sam2.1/sam2.1_hiera_b+.yaml",
             use_adapter=True,
             pca_model=pca_model,
         )
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        state_dict = checkpoint["model_state_dict"] if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint else checkpoint
+        model.load_state_dict(state_dict, strict=False)
         model.eval()
         model.to(device)
 
-        print("[Model] Running inference (this may take a few minutes on CPU)...")
+        print(f"[Model] Running inference on {device}...")
 
         # Process in patches to avoid memory issues
         patch_size = 64
@@ -164,21 +168,21 @@ def run_model_inference(data, gt, pca_model):
                     pH, pW = patch.shape[:2]
 
                     # Prepare inputs
-                    hsi_t = torch.from_numpy(patch.transpose(2, 0, 1)).unsqueeze(0).float()
+                    hsi_t = torch.from_numpy(patch.transpose(2, 0, 1)).unsqueeze(0).float().to(device)
                     pca_3 = pca_model.transform(patch.reshape(-1, B)).reshape(pH, pW, 3)
-                    pca_t = torch.from_numpy(pca_3.transpose(2, 0, 1)).unsqueeze(0).float()
+                    pca_t = torch.from_numpy(pca_3.transpose(2, 0, 1)).unsqueeze(0).float().to(device)
 
                     out = model(hsi_t, pca_t)
                     logits = out["logits"]  # (1, C, pH, pW)
                     probs = F.softmax(logits, dim=1)
 
-                    pred = probs.argmax(dim=1).squeeze().numpy()
-                    entropy = -(probs * (probs + 1e-8).log()).sum(dim=1).squeeze().numpy()
+                    pred = probs.argmax(dim=1).squeeze().cpu().numpy()
+                    entropy = -(probs * (probs + 1e-8).log()).sum(dim=1).squeeze().cpu().numpy()
 
                     predictions[y:yend, x:xend] = pred
                     uncertainty[y:yend, x:xend] = entropy
 
-                print(f"[Model] Row {y+patch_size}/{H} done")
+                print(f"[Model] Row {min(y+patch_size, H)}/{H} done")
 
         print("[Model] ✅ Real model inference complete")
         return predictions, uncertainty
@@ -241,11 +245,12 @@ def _fallback_predictions(data, gt, pca_model):
     return predictions, uncertainty
 
 
-def load_al_results():
+def load_al_results(results_dir=None):
     """Load real AL results from all 3 strategy JSON files."""
+    results_dir = results_dir or RESULTS_DIR
     strategies = {}
     for strategy in ["bald", "entropy", "random"]:
-        path = os.path.join(RESULTS_DIR, f"al_results_{strategy}.json")
+        path = os.path.join(results_dir, f"al_results_{strategy}.json")
         if os.path.exists(path):
             with open(path, "r") as f:
                 content = f.read()
@@ -305,15 +310,32 @@ def generate_query_history(gt, al_results, scale):
     return query_history
 
 
-def export_all():
+def export_all(config_path=None, results_dir=None, output_dir=None):
     """Main export pipeline."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    cfg = {}
+    if config_path and os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f) or {}
+
+    dataset_name = cfg.get("dataset", {}).get("name", "pavia")
+    effective_results_dir = results_dir or cfg.get("evaluation", {}).get("output_dir", RESULTS_DIR)
+    effective_output_dir = output_dir or os.path.join(PROJECT_ROOT, "visualization", "dashboard", "data", dataset_name)
+    checkpoint_path = os.path.join(effective_results_dir, "adapter_best.pt")
+
+    os.makedirs(effective_output_dir, exist_ok=True)
     print(f"=" * 60)
-    print(f"  Generating Dashboard Data (output: {OUTPUT_DIR})")
+    print(f"  Generating Dashboard Data: {dataset_name.upper()}")
+    print(f"  Results Dir: {effective_results_dir}")
+    print(f"  Output Dir:  {effective_output_dir}")
     print(f"=" * 60)
 
     # ---- Load raw data ----
-    data, gt = load_pavia_raw()
+    if dataset_name == "indian_pines":
+        data, gt = load_indian_pines_raw()
+        num_classes = 17
+    else:
+        data, gt = load_pavia_raw()
+        num_classes = 10
 
     # ---- Downsample ----
     data, gt, scale = downsample(data, gt, MAX_RESOLUTION)
@@ -326,12 +348,14 @@ def export_all():
         "width": W, "height": H,
         "pixels": false_color.tolist(),
     }
-    with open(os.path.join(OUTPUT_DIR, "false_color.json"), "w") as f:
+    with open(os.path.join(effective_output_dir, "false_color.json"), "w") as f:
         json.dump(fc_data, f)
     print(f"[Export] ✅ false_color.json ({W}×{H})")
 
     # ---- Model predictions + uncertainty ----
-    predictions, uncertainty = run_model_inference(data, gt, pca_model)
+    predictions, uncertainty = run_model_inference(
+        data, gt, pca_model, checkpoint_path=checkpoint_path, num_classes=num_classes
+    )
 
     # Segmentation map
     seg_data = {
@@ -339,7 +363,7 @@ def export_all():
         "ground_truth": gt.tolist(),
         "predictions": predictions.tolist(),
     }
-    with open(os.path.join(OUTPUT_DIR, "segmentation_map.json"), "w") as f:
+    with open(os.path.join(effective_output_dir, "segmentation_map.json"), "w") as f:
         json.dump(seg_data, f)
     print(f"[Export] ✅ segmentation_map.json")
 
@@ -356,23 +380,25 @@ def export_all():
         "min_raw": u_min,
         "max_raw": u_max,
     }
-    with open(os.path.join(OUTPUT_DIR, "uncertainty_map.json"), "w") as f:
+    with open(os.path.join(effective_output_dir, "uncertainty_map.json"), "w") as f:
         json.dump(unc_data, f)
     print(f"[Export] ✅ uncertainty_map.json")
 
     # ---- AL results ----
-    al_results = load_al_results()
+    al_results = load_al_results(effective_results_dir)
 
     # Query history
     query_history = generate_query_history(gt, al_results, scale)
-    with open(os.path.join(OUTPUT_DIR, "query_history.json"), "w") as f:
+    with open(os.path.join(effective_output_dir, "query_history.json"), "w") as f:
         json.dump(query_history, f)
     print(f"[Export] ✅ query_history.json ({len(query_history)} rounds)")
 
     # Metrics summary (combine all strategies)
+    init_labeled = 2138 if dataset_name == "pavia" else int(0.05 * H * W)
     metrics_data = {
+        "dataset": dataset_name,
         "strategies": {},
-        "initial": {"labeled_count": 2138, "miou": 0.0073},
+        "initial": {"labeled_count": init_labeled, "miou": 0.0073},
     }
     for strat_name, strat_data in al_results.items():
         rounds_clean = []
@@ -389,14 +415,22 @@ def export_all():
             "strategy": strat_name,
         }
 
-    with open(os.path.join(OUTPUT_DIR, "metrics_summary.json"), "w") as f:
+    with open(os.path.join(effective_output_dir, "metrics_summary.json"), "w") as f:
         json.dump(metrics_data, f, indent=2)
     print(f"[Export] ✅ metrics_summary.json ({len(al_results)} strategies)")
 
     print(f"\n{'=' * 60}")
-    print(f"  ✅ All dashboard data exported to {OUTPUT_DIR}")
+    print(f"  ✅ All dashboard data exported to {effective_output_dir}")
     print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
-    export_all()
+    parser = argparse.ArgumentParser(description="Generate web dashboard data")
+    parser.add_argument("--config", type=str, default="configs/default.yaml",
+                        help="Path to YAML config file")
+    parser.add_argument("--results_dir", type=str, default=None,
+                        help="Path to results directory containing checkpoints and AL JSONs")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Path to output directory for exported dashboard JSON files")
+    args = parser.parse_args()
+    export_all(config_path=args.config, results_dir=args.results_dir, output_dir=args.output_dir)

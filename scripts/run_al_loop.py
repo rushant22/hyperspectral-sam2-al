@@ -205,9 +205,14 @@ def main():
                         choices=["bald", "entropy", "random", "badge_inspired"])
     parser.add_argument("--all-strategies", action="store_true",
                         help="Run all strategies for comparison")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Override evaluation output directory")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.output_dir:
+        cfg["evaluation"]["output_dir"] = args.output_dir
+    os.makedirs(cfg["evaluation"]["output_dir"], exist_ok=True)
 
     # --- Prepare data (shared across strategies) ---
     data = prepare_data(cfg)
