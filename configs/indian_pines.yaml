@@ -57,8 +57,9 @@ loss:
   dice_smooth: 1.0
 
 training:
-  epochs: 100
-  batch_size: 2                  # smaller: IP is single large image, needs memory
+  epochs: 200
+  batch_size: 1                  # IP is single full image per split
+  repeat_factor: 20              # repeat single-image dataset 20x per epoch for sufficient steps
   learning_rate: 1.0e-4
   decoder_lr: 5.0e-5
   weight_decay: 0.01
@@ -66,9 +67,9 @@ training:
   scheduler: "cosine"
   warmup_epochs: 5
   grad_clip_norm: 1.0
-  early_stopping_patience: 15
+  early_stopping_patience: 40
   use_amp: true
-  grad_accumulation_steps: 2    # effective batch = 4
+  grad_accumulation_steps: 2    # effective batch = 2
   device: "cuda"
 
 active_learning:

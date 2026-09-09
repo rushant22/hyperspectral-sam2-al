@@ -22,6 +22,8 @@ import argparse
 import yaml
 import json
 import copy
+import subprocess
+import gc
 import torch
 import numpy as np
 from datetime import datetime
@@ -183,6 +185,13 @@ def quick_train_eval(cfg: dict, label: str) -> dict:
         "per_class_iou": compute_per_class_iou(all_preds, all_targets, num_classes),
     }
     print(f"  [{label}] mIoU: {metrics['miou']:.4f}, OA: {metrics['oa']:.4f}")
+
+    # Clean up GPU/RAM memory between variants
+    del model, optimizer, scaler
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
+
     return metrics
 
 
@@ -216,20 +225,44 @@ def ablation_lora_rank(base_cfg: dict) -> dict:
     results = {}
 
     output_dir = base_cfg["evaluation"]["output_dir"]
-    best_ckpt = os.path.join(output_dir, "adapter_best.pt")
+    os.makedirs(output_dir, exist_ok=True)
 
     for rank in [4, 8, 16]:
         cfg = copy.deepcopy(base_cfg)
         cfg["lora"]["rank"] = rank
         cfg["lora"]["alpha"] = rank * 2  # Keep alpha/rank = 2
+        # Use dedicated output dir per rank variant to prevent checkpoint collision
+        variant_output_dir = os.path.join(output_dir, f"lora_rank_{rank}")
+        cfg["evaluation"]["output_dir"] = variant_output_dir
+        os.makedirs(variant_output_dir, exist_ok=True)
 
-        # IMPORTANT: remove the existing best checkpoint so this variant
-        # cannot accidentally load weights trained at a different rank.
-        # Each call to quick_train_eval trains from scratch.
-        if os.path.exists(best_ckpt):
-            os.remove(best_ckpt)
+        # Cap ablation epochs to 60 for speed
+        cfg["training"]["epochs"] = min(base_cfg["training"]["epochs"], 60)
 
-        results[f"rank_{rank}"] = quick_train_eval(cfg, f"r={rank}")
+        # Save isolated config
+        temp_cfg_path = os.path.join(variant_output_dir, f"config_rank_{rank}.yaml")
+        with open(temp_cfg_path, "w") as f:
+            yaml.dump(cfg, f)
+
+        # Run in separate subprocess to guarantee zero state leakage across variants
+        print(f"\n  [LoRA Rank] Launching isolated subprocess for r={rank}...")
+        cmd = [sys.executable, "scripts/train_adapter.py", "--config", temp_cfg_path]
+        try:
+            subprocess.run(cmd, check=True)
+            log_path = os.path.join(variant_output_dir, "adapter_training_log.json")
+            if os.path.exists(log_path):
+                with open(log_path, "r") as f:
+                    log_data = json.load(f)
+                results[f"rank_{rank}"] = {
+                    "miou": log_data["test_metrics"]["miou"],
+                    "oa": log_data["test_metrics"]["oa"],
+                    "per_class_iou": log_data["per_class_iou"],
+                }
+            else:
+                results[f"rank_{rank}"] = quick_train_eval(cfg, f"r={rank}")
+        except Exception as e:
+            print(f"  [WARNING] Subprocess failed for r={rank} ({e}). Falling back to in-process evaluation.")
+            results[f"rank_{rank}"] = quick_train_eval(cfg, f"r={rank}")
 
     return results
 

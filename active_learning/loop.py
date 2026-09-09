@@ -162,6 +162,24 @@ class ActiveLearningLoop:
             # Step 4: "Label" via oracle
             oracle_result = self.oracle.label_pixels(query_coords)
 
+            # Emergency fallback: ensure AL never gets 0 new labels if unlabeled pixels remain
+            if oracle_result["num_new"] == 0:
+                valid_pool_mask = (self.oracle.ground_truth > 0) & (~self.oracle.labeled_mask)
+                pool_coords = torch.nonzero(valid_pool_mask)
+                if len(pool_coords) > 0:
+                    min_budget = max(10, self.query_budget // 5)
+                    n_emerg = min(min_budget, len(pool_coords))
+                    g = torch.Generator().manual_seed(999 + round_idx)
+                    perm = torch.randperm(len(pool_coords), generator=g)[:n_emerg]
+                    extra = pool_coords[perm]
+                    for idx in range(len(extra)):
+                        er, ec = extra[idx, 0].item(), extra[idx, 1].item()
+                        self.oracle.labeled_mask[er, ec] = True
+                    self.oracle.total_labeled = self.oracle.labeled_mask.sum().item()
+                    oracle_result["num_new"] += n_emerg
+                    query_coords = torch.cat([query_coords, extra], dim=0) if len(query_coords) > 0 else extra
+                    print(f"  [AL] Emergency top-up: added {n_emerg} valid non-background pixels.")
+
             # Step 5: Evaluate on test set
             metrics = self._evaluate_on_test()
 
@@ -307,46 +325,79 @@ class ActiveLearningLoop:
                 veg = None  # ignore vegetation mask for this round
 
         if self.strategy == "random":
-            return random_query(
+            query_coords = random_query(
                 num_pixels=self.query_budget,
                 total_pixels=labeled_mask.numel(),
                 labeled_mask=labeled_mask,
                 vegetation_mask=veg,
                 seed=42 + round_idx,
             )
-
-        # For entropy/bald strategies, get the appropriate score map
-        if self.strategy == "entropy":
+        elif self.strategy == "entropy":
             scores = uncertainty["entropy"]
+            query_coords = uncertainty_query(
+                uncertainty_scores=scores,
+                num_pixels=self.query_budget,
+                labeled_mask=labeled_mask,
+                vegetation_mask=veg,
+            )
         elif self.strategy in ("bald", "badge_inspired"):
             scores = uncertainty["bald"]
+            if self.strategy == "badge_inspired" and self.use_diversity:
+                # Need features for clustering — re-run a single forward pass
+                self.model.eval()
+                with torch.no_grad():
+                    hsi = self.full_data.unsqueeze(0).to(self.device)
+                    pca = self.pca_rgb.unsqueeze(0).to(self.device) if self.pca_rgb is not None else None
+                    output = self.model(hsi, pca)
+                    features = output["features"].squeeze(0).cpu()  # (D, H, W)
+
+                query_coords = badge_inspired_query(
+                    uncertainty_scores=scores,
+                    features=features,
+                    num_pixels=self.query_budget,
+                    num_clusters=self.diversity_clusters,
+                    labeled_mask=labeled_mask,
+                    vegetation_mask=veg,
+                )
+            else:
+                query_coords = uncertainty_query(
+                    uncertainty_scores=scores,
+                    num_pixels=self.query_budget,
+                    labeled_mask=labeled_mask,
+                    vegetation_mask=veg,
+                )
         else:
             raise ValueError(f"Unknown strategy: {self.strategy}")
 
-        if self.strategy == "badge_inspired" and self.use_diversity:
-            # Need features for clustering — re-run a single forward pass
-            self.model.eval()
-            with torch.no_grad():
-                hsi = self.full_data.unsqueeze(0).to(self.device)
-                pca = self.pca_rgb.unsqueeze(0).to(self.device) if self.pca_rgb is not None else None
-                output = self.model(hsi, pca)
-                features = output["features"].squeeze(0).cpu()  # (D, H, W)
-
-            return badge_inspired_query(
-                uncertainty_scores=scores,
-                features=features,
-                num_pixels=self.query_budget,
-                num_clusters=self.diversity_clusters,
-                labeled_mask=labeled_mask,
-                vegetation_mask=veg,
-            )
+        # --- Minimum Budget Guarantee ---
+        # Ensure AL never starves for new labels in late rounds when uncertainty
+        # picks land on background or already-dense areas.
+        min_budget = max(10, self.query_budget // 5)
+        gt = self.oracle.ground_truth
+        if len(query_coords) > 0:
+            r = query_coords[:, 0]
+            c = query_coords[:, 1]
+            valid_new = (gt[r, c] > 0) & (~labeled_mask[r, c])
+            n_valid = valid_new.sum().item()
         else:
-            return uncertainty_query(
-                uncertainty_scores=scores,
-                num_pixels=self.query_budget,
-                labeled_mask=labeled_mask,
-                vegetation_mask=veg,
-            )
+            n_valid = 0
+
+        if n_valid < min_budget:
+            shortfall = min_budget - n_valid
+            valid_pool_mask = (gt > 0) & (~labeled_mask)
+            if len(query_coords) > 0:
+                valid_pool_mask[query_coords[:, 0], query_coords[:, 1]] = False
+            pool_coords = torch.nonzero(valid_pool_mask)
+            if len(pool_coords) > 0:
+                n_sample = min(shortfall, len(pool_coords))
+                g = torch.Generator().manual_seed(42 + round_idx * 1000)
+                perm = torch.randperm(len(pool_coords), generator=g)[:n_sample]
+                extra_coords = pool_coords[perm]
+                query_coords = torch.cat([query_coords, extra_coords], dim=0) if len(query_coords) > 0 else extra_coords
+                print(f"  [AL] Top-up guarantee: added {n_sample} random non-background pixels "
+                      f"(projected new: {n_valid + n_sample}, min_budget={min_budget})")
+
+        return query_coords
 
     def _evaluate_on_test(self) -> Dict:
         """Evaluate model on the test set."""

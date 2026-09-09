@@ -1,0 +1,234 @@
+{
+  "dataset": "indian_pines",
+  "strategies": {
+    "bald": {
+      "rounds": [
+        {
+          "round": 1,
+          "labeled_count": 860,
+          "miou": 0.181521225712103,
+          "num_new_labels": 348,
+          "mean_entropy": 2.5256853103637695
+        },
+        {
+          "round": 2,
+          "labeled_count": 1039,
+          "miou": 0.2814643674212014,
+          "num_new_labels": 179,
+          "mean_entropy": 1.9992092847824097
+        },
+        {
+          "round": 3,
+          "labeled_count": 1377,
+          "miou": 0.26977860762351435,
+          "num_new_labels": 338,
+          "mean_entropy": 1.6820399761199951
+        },
+        {
+          "round": 4,
+          "labeled_count": 1712,
+          "miou": 0.30229808316637935,
+          "num_new_labels": 335,
+          "mean_entropy": 1.689192533493042
+        },
+        {
+          "round": 5,
+          "labeled_count": 1965,
+          "miou": 0.3006632440875277,
+          "num_new_labels": 253,
+          "mean_entropy": 1.5397365093231201
+        },
+        {
+          "round": 6,
+          "labeled_count": 2153,
+          "miou": 0.3460229708607676,
+          "num_new_labels": 188,
+          "mean_entropy": 1.5588737726211548
+        },
+        {
+          "round": 7,
+          "labeled_count": 2360,
+          "miou": 0.3819939411981004,
+          "num_new_labels": 207,
+          "mean_entropy": 1.4256565570831299
+        },
+        {
+          "round": 8,
+          "labeled_count": 2421,
+          "miou": 0.3351095647322644,
+          "num_new_labels": 61,
+          "mean_entropy": 1.4170607328414917
+        },
+        {
+          "round": 9,
+          "labeled_count": 2619,
+          "miou": 0.3546040430885682,
+          "num_new_labels": 198,
+          "mean_entropy": 1.3237489461898804
+        },
+        {
+          "round": 10,
+          "labeled_count": 2712,
+          "miou": 0.39160264280672746,
+          "num_new_labels": 93,
+          "mean_entropy": 1.3632017374038696
+        }
+      ],
+      "strategy": "bald"
+    },
+    "entropy": {
+      "rounds": [
+        {
+          "round": 1,
+          "labeled_count": 594,
+          "miou": 0.181521225712103,
+          "num_new_labels": 82,
+          "mean_entropy": 2.5256853103637695
+        },
+        {
+          "round": 2,
+          "labeled_count": 620,
+          "miou": 0.3140746721255176,
+          "num_new_labels": 26,
+          "mean_entropy": 1.9635217189788818
+        },
+        {
+          "round": 3,
+          "labeled_count": 636,
+          "miou": 0.3504740297537927,
+          "num_new_labels": 16,
+          "mean_entropy": 1.7300044298171997
+        },
+        {
+          "round": 4,
+          "labeled_count": 646,
+          "miou": 0.3829234347677064,
+          "num_new_labels": 10,
+          "mean_entropy": 1.6055269241333008
+        },
+        {
+          "round": 5,
+          "labeled_count": 662,
+          "miou": 0.443959036408576,
+          "num_new_labels": 16,
+          "mean_entropy": 1.5404243469238281
+        },
+        {
+          "round": 6,
+          "labeled_count": 666,
+          "miou": 0.418321738498883,
+          "num_new_labels": 4,
+          "mean_entropy": 1.4793142080307007
+        },
+        {
+          "round": 7,
+          "labeled_count": 669,
+          "miou": 0.5048839744398594,
+          "num_new_labels": 3,
+          "mean_entropy": 1.3264405727386475
+        },
+        {
+          "round": 8,
+          "labeled_count": 669,
+          "miou": 0.4889584887103568,
+          "num_new_labels": 0,
+          "mean_entropy": 1.2372928857803345
+        },
+        {
+          "round": 9,
+          "labeled_count": 673,
+          "miou": 0.4841488337868062,
+          "num_new_labels": 4,
+          "mean_entropy": 1.1906728744506836
+        },
+        {
+          "round": 10,
+          "labeled_count": 676,
+          "miou": 0.5271848260098695,
+          "num_new_labels": 3,
+          "mean_entropy": 1.2807762622833252
+        }
+      ],
+      "strategy": "entropy"
+    },
+    "random": {
+      "rounds": [
+        {
+          "round": 1,
+          "labeled_count": 719,
+          "miou": 0.181521225712103,
+          "num_new_labels": 207,
+          "mean_entropy": 2.5256853103637695
+        },
+        {
+          "round": 2,
+          "labeled_count": 917,
+          "miou": 0.2742796951307232,
+          "num_new_labels": 198,
+          "mean_entropy": 1.8957430124282837
+        },
+        {
+          "round": 3,
+          "labeled_count": 1113,
+          "miou": 0.33508342152038467,
+          "num_new_labels": 196,
+          "mean_entropy": 1.6709901094436646
+        },
+        {
+          "round": 4,
+          "labeled_count": 1303,
+          "miou": 0.37082281529164945,
+          "num_new_labels": 190,
+          "mean_entropy": 1.535212516784668
+        },
+        {
+          "round": 5,
+          "labeled_count": 1492,
+          "miou": 0.3869326975564756,
+          "num_new_labels": 189,
+          "mean_entropy": 1.489385724067688
+        },
+        {
+          "round": 6,
+          "labeled_count": 1682,
+          "miou": 0.45660234217974993,
+          "num_new_labels": 190,
+          "mean_entropy": 1.414177656173706
+        },
+        {
+          "round": 7,
+          "labeled_count": 1878,
+          "miou": 0.46066368524780205,
+          "num_new_labels": 196,
+          "mean_entropy": 1.2772703170776367
+        },
+        {
+          "round": 8,
+          "labeled_count": 2064,
+          "miou": 0.514226622475017,
+          "num_new_labels": 186,
+          "mean_entropy": 1.229234218597412
+        },
+        {
+          "round": 9,
+          "labeled_count": 2248,
+          "miou": 0.5271444501809677,
+          "num_new_labels": 184,
+          "mean_entropy": 1.2588567733764648
+        },
+        {
+          "round": 10,
+          "labeled_count": 2411,
+          "miou": 0.5012861670783598,
+          "num_new_labels": 163,
+          "mean_entropy": 1.1142748594284058
+        }
+      ],
+      "strategy": "random"
+    }
+  },
+  "initial": {
+    "labeled_count": 1051,
+    "miou": 0.0073
+  }
+}

@@ -225,8 +225,18 @@ def main():
     train_dataset, pca_model = load_dataset(cfg, "train")
     val_dataset, _ = load_dataset(cfg, "val")
 
+    # For single-sample datasets (e.g. full-scene HSI like Indian Pines),
+    # repeat the dataset so each epoch has multiple gradient steps
+    train_dataset_for_loader = train_dataset
+    repeat_factor = cfg["training"].get("repeat_factor", 1)
+    if len(train_dataset) == 1 and repeat_factor <= 1:
+        repeat_factor = 20
+    if repeat_factor > 1:
+        print(f"  [Dataset] Repeating single-sample dataset {repeat_factor}x per epoch for sufficient gradient steps")
+        train_dataset_for_loader = torch.utils.data.ConcatDataset([train_dataset] * repeat_factor)
+
     train_loader = torch.utils.data.DataLoader(
-        train_dataset,
+        train_dataset_for_loader,
         batch_size=cfg["training"]["batch_size"],
         shuffle=True, num_workers=0, pin_memory=(device == "cuda"),
     )
@@ -354,8 +364,9 @@ def main():
                 os.makedirs(save_dir, exist_ok=True)
                 torch.save(model.state_dict(), os.path.join(save_dir, "adapter_best.pt"))
             else:
-                patience_counter += 5
-                if patience_counter >= patience:
+                patience_counter += 1
+                max_checks = max(1, patience // 5)
+                if patience_counter >= max_checks:
                     print(f"\nEarly stopping at epoch {epoch} (best mIoU: {best_miou:.4f})")
                     break
 
