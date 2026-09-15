@@ -114,8 +114,8 @@ def quick_train_eval(cfg: dict, label: str) -> dict:
 
     scaler = torch.amp.GradScaler('cuda', enabled=cfg["training"]["use_amp"] and device == "cuda")
 
-    # Ablation training: use fewer epochs for speed
-    ablation_epochs = min(cfg["training"]["epochs"], 60)
+    # Use the full epoch count from config (no artificial cap)
+    ablation_epochs = cfg["training"]["epochs"]
     print(f"  [{label}] Training for {ablation_epochs} epochs...")
 
     model.train()
@@ -231,13 +231,21 @@ def ablation_lora_rank(base_cfg: dict) -> dict:
         cfg = copy.deepcopy(base_cfg)
         cfg["lora"]["rank"] = rank
         cfg["lora"]["alpha"] = rank * 2  # Keep alpha/rank = 2
+        # Use a distinct seed per rank so weight init + data order diverge
+        cfg["seed"] = base_cfg["seed"] + rank
         # Use dedicated output dir per rank variant to prevent checkpoint collision
         variant_output_dir = os.path.join(output_dir, f"lora_rank_{rank}")
         cfg["evaluation"]["output_dir"] = variant_output_dir
         os.makedirs(variant_output_dir, exist_ok=True)
 
-        # Cap ablation epochs to 60 for speed
-        cfg["training"]["epochs"] = min(base_cfg["training"]["epochs"], 60)
+        # Delete any stale checkpoint from a previous run to avoid loading old weights
+        stale_ckpt = os.path.join(variant_output_dir, "adapter_best.pt")
+        if os.path.exists(stale_ckpt):
+            os.remove(stale_ckpt)
+            print(f"  [Cleanup] Removed stale checkpoint: {stale_ckpt}")
+
+        # Use full training epochs (no artificial cap — needed for rank differences to emerge)
+        cfg["training"]["epochs"] = base_cfg["training"]["epochs"]
 
         # Save isolated config
         temp_cfg_path = os.path.join(variant_output_dir, f"config_rank_{rank}.yaml")
