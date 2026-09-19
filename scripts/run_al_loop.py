@@ -85,6 +85,16 @@ def prepare_data(cfg: dict):
         class_names = dataset.class_names
         band_mean = dataset.band_mean
         band_std = dataset.band_std
+
+    elif dataset_name == "tallgrass":
+        # Tallgrass: 50 pre-extracted patches, concatenated into a strip for AL
+        from data.tallgrass import TallgrassDataset
+        dataset = TallgrassDataset(root_dir=root_dir, seed=cfg["seed"])
+        full_data, full_labels = dataset.get_al_composite()  # (H, total_W, B), (H, total_W)
+        num_classes = dataset.num_classes + 1
+        class_names = dataset.class_names
+        band_mean = dataset.band_mean
+        band_std = dataset.band_std
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 

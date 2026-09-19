@@ -1,0 +1,111 @@
+# =============================================================================
+# Tallgrass Prairie Configuration — AL-HSI-SAM2
+# =============================================================================
+# Dataset-specific overrides for Tallgrass Prairie Preserve (Flight 017).
+# Inherits all defaults from configs/default.yaml — only changed values here.
+#
+# Usage:
+#   python scripts/train_adapter.py --config configs/tallgrass.yaml
+#   python scripts/run_al_loop.py --config configs/tallgrass.yaml --all-strategies
+
+# ---- Reproducibility ----
+seed: 42
+
+# ---- Dataset ----
+dataset:
+  name: "tallgrass"
+  root_dir: "./datasets"             # expects datasets/tallgrass/selected_patches/
+  patch_size: 128                    # matches extracted patch size
+  patch_overlap: 0.0                 # patches are already pre-extracted, no tiling
+  sam2_input_size: 256               # resize for SAM2 (same as benchmarks)
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+  pca_components: 3
+  normalization: "per_band"
+
+# ---- SAM2 Backbone ----
+sam2:
+  checkpoint: "./checkpoints/sam2.1_hiera_base_plus.pt"
+  model_cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"
+  freeze_image_encoder: true
+  freeze_prompt_encoder: true
+  embed_dim: 256
+
+# ---- LoRA Configuration ----
+lora:
+  enabled: true
+  rank: 8
+  alpha: 16
+  target_modules: ["q_proj", "v_proj"]
+  dropout: 0.1
+  adapt_mask_decoder: false
+
+# ---- Spectral Cross-Attention Adapter ----
+adapter:
+  enabled: true
+  num_queries: 12                    # 12 biochemical-response queries (VNIR-SWIR)
+  d_model: 256
+  num_heads: 8
+  ffn_dim: 512
+  dropout: 0.1
+  use_residual: true
+
+# ---- Multi-Class Segmentation Head ----
+seg_head:
+  type: "conv1x1"
+  # num_classes = 2 (Background + Sericea) — set automatically from dataset
+  hidden_dim: 128
+
+# ---- Loss Function ----
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  focal_gamma: 2.0
+  focal_alpha: null                  # auto from class frequencies
+  dice_smooth: 1.0
+
+# ---- Training ----
+training:
+  epochs: 200                        # more epochs — small dataset needs longer training
+  batch_size: 4
+  learning_rate: 1.0e-4
+  decoder_lr: 5.0e-5
+  weight_decay: 0.01
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 10
+  grad_clip_norm: 1.0
+  early_stopping_patience: 30       # longer patience for small dataset
+  use_amp: true
+  grad_accumulation_steps: 1
+  device: "cuda"
+  # Repeat factor: each patch appears 5x per epoch (35 train patches * 5 = 175 steps)
+  repeat_factor: 5
+
+# ---- Active Learning ----
+active_learning:
+  enabled: true
+  initial_labeled_fraction: 0.05
+  num_rounds: 10
+  query_fraction_per_round: 0.02
+  mc_dropout_passes: 10
+  strategy: "entropy"                # Entropy was most efficient on benchmarks
+  use_spatial_diversity: true
+  diversity_clusters: 30             # fewer clusters for smaller image
+  ndvi_threshold: 0.2
+  ndvi_red_band: null                # auto-detected from get_ndvi_band_indices
+  ndvi_nir_band: null
+  retrain_epochs: 50
+
+# ---- Evaluation ----
+evaluation:
+  metrics: ["miou", "per_class_iou", "overall_accuracy", "kappa"]
+  save_predictions: true
+  output_dir: "./results"
+
+# ---- Visualization Dashboard ----
+visualization:
+  entropy_high: 0.8
+  entropy_mid: 0.5
+  entropy_low: 0.3

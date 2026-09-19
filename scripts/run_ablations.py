@@ -80,6 +80,13 @@ def quick_train_eval(cfg: dict, label: str) -> dict:
                                patch_size=cfg["dataset"]["patch_size"],
                                patch_overlap=cfg["dataset"]["patch_overlap"])
         full_data = train_ds.full_data
+    elif dataset_name == "tallgrass":
+        from data.tallgrass import TallgrassDataset
+        repeat_factor = cfg["training"].get("repeat_factor", 1)
+        train_ds = TallgrassDataset(root_dir=root_dir, split="train", seed=cfg["seed"],
+                                     repeat_factor=repeat_factor)
+        test_ds = TallgrassDataset(root_dir=root_dir, split="test", seed=cfg["seed"])
+        full_data, _ = train_ds.get_al_composite()
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 

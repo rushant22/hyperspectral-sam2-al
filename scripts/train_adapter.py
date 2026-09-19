@@ -67,6 +67,14 @@ def load_dataset(cfg: dict, split: str):
             split=split,
             seed=cfg["seed"],
         )
+    elif dataset_name == "tallgrass":
+        from data.tallgrass import TallgrassDataset
+        dataset = TallgrassDataset(
+            root_dir=root_dir,
+            split=split,
+            seed=cfg["seed"],
+            repeat_factor=cfg["training"].get("repeat_factor", 1),
+        )
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -80,6 +88,8 @@ def load_dataset(cfg: dict, split: str):
     # PCA model for the residual pathway
     if dataset_name == "indian_pines":
         full_data = dataset.data
+    elif dataset_name == "tallgrass":
+        full_data, _ = dataset.get_al_composite()  # (H, total_W, B)
     else:
         full_data = dataset.full_data
     _, pca_model = apply_pca(full_data, n_components=cfg["dataset"]["pca_components"])

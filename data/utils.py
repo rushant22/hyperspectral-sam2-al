@@ -151,6 +151,9 @@ def get_ndvi_band_indices(dataset_name: str) -> Tuple[int, int]:
         # AisaFENIX: 400-2500nm, 310 bands
         # Red ≈ 660nm → band ~40, NIR ≈ 850nm → band ~70
         "toulouse": (40, 70),
+        # AisaFENIX 1K (Tallgrass): 235 usable bands (433-2352nm after filtering)
+        # Red ≈ 660nm → band 33 (659.65nm), NIR ≈ 850nm → band 61 (852.82nm)
+        "tallgrass": (33, 61),
     }
 
     if dataset_name not in indices:
