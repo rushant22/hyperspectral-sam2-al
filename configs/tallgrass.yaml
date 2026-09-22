@@ -14,10 +14,10 @@ seed: 42
 # ---- Dataset ----
 dataset:
   name: "tallgrass"
-  root_dir: "./datasets"             # expects datasets/tallgrass/selected_patches/
+  root_dir: "/content/drive/MyDrive/datasets/flight017_dataset"      # expects datasets/tallgrass/selected_patches/
   patch_size: 128                    # matches extracted patch size
-  patch_overlap: 0.0                 # patches are already pre-extracted, no tiling
-  sam2_input_size: 256               # resize for SAM2 (same as benchmarks)
+  patch_overlap: 0.0                # patches are already pre-extracted, no tiling
+  sam2_input_size: 128              # resize for SAM2 (same as benchmarks)
   train_ratio: 0.7
   val_ratio: 0.1
   test_ratio: 0.2
@@ -67,21 +67,20 @@ loss:
 
 # ---- Training ----
 training:
-  epochs: 200                        # more epochs — small dataset needs longer training
+  epochs: 5
   batch_size: 4
   learning_rate: 1.0e-4
   decoder_lr: 5.0e-5
   weight_decay: 0.01
   optimizer: "adamw"
   scheduler: "cosine"
-  warmup_epochs: 10
+  warmup_epochs: 1
   grad_clip_norm: 1.0
-  early_stopping_patience: 30       # longer patience for small dataset
+  early_stopping_patience: 5
   use_amp: true
   grad_accumulation_steps: 1
   device: "cuda"
-  # Repeat factor: each patch appears 5x per epoch (35 train patches * 5 = 175 steps)
-  repeat_factor: 5
+  repeat_factor: 1
 
 # ---- Active Learning ----
 active_learning:

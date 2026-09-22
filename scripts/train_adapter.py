@@ -53,13 +53,32 @@ def set_seed(seed: int):
 
 
 def load_dataset(cfg: dict, split: str):
-    """Load dataset and return (dataset, pca_model)."""
-    dataset_name = cfg["dataset"]["name"]
-    root_dir = os.path.join(cfg["dataset"]["root_dir"], dataset_name)
+    """Load dataset. PCA is fitted separately on the training set."""
 
+    dataset_name = cfg["dataset"]["name"]
+
+    # Tallgrass root_dir points directly to the Flight 017 dataset.
+    if dataset_name == "tallgrass":
+        root_dir = cfg["dataset"]["root_dir"]
+    else:
+        root_dir = os.path.join(
+            cfg["dataset"]["root_dir"],
+            dataset_name
+        )
+
+    # ---------------------------------------------------------
+    # Load dataset
+    # ---------------------------------------------------------
     if dataset_name == "indian_pines":
-        dataset = IndianPinesDataset(root_dir=root_dir, split=split, seed=cfg["seed"])
+
+        dataset = IndianPinesDataset(
+            root_dir=root_dir,
+            split=split,
+            seed=cfg["seed"]
+        )
+
     elif dataset_name == "pavia":
+
         dataset = PaviaDataset(
             root_dir=root_dir,
             patch_size=cfg["dataset"]["patch_size"],
@@ -67,34 +86,48 @@ def load_dataset(cfg: dict, split: str):
             split=split,
             seed=cfg["seed"],
         )
+
     elif dataset_name == "tallgrass":
+
         from data.tallgrass import TallgrassDataset
+
         dataset = TallgrassDataset(
             root_dir=root_dir,
             split=split,
             seed=cfg["seed"],
-            repeat_factor=cfg["training"].get("repeat_factor", 1),
+            repeat_factor=cfg["training"].get(
+                "repeat_factor",
+                1
+            ),
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown dataset: {dataset_name}"
+        )
+
+    # ---------------------------------------------------------
+    # Dataset transform
+    # ---------------------------------------------------------
+    target_size = cfg["dataset"]["sam2_input_size"]
+
+    if split == "train":
+        transform = get_train_transform(
+            target_size,
+            dataset.band_mean,
+            dataset.band_std
         )
     else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
+        transform = get_eval_transform(
+            target_size,
+            dataset.band_mean,
+            dataset.band_std
+        )
 
-    target_size = cfg["dataset"]["sam2_input_size"]
-    if split == "train":
-        transform = get_train_transform(target_size, dataset.band_mean, dataset.band_std)
-    else:
-        transform = get_eval_transform(target_size, dataset.band_mean, dataset.band_std)
     dataset.transform = transform
 
-    # PCA model for the residual pathway
-    if dataset_name == "indian_pines":
-        full_data = dataset.data
-    elif dataset_name == "tallgrass":
-        full_data, _ = dataset.get_al_composite()  # (H, total_W, B)
-    else:
-        full_data = dataset.full_data
-    _, pca_model = apply_pca(full_data, n_components=cfg["dataset"]["pca_components"])
-
-    return dataset, pca_model
+    # PCA is fitted only once on the training dataset in main().
+    return dataset, None
 
 
 def compute_pca_batch(data_batch: torch.Tensor, pca_model) -> torch.Tensor:
@@ -111,8 +144,19 @@ def compute_pca_batch(data_batch: torch.Tensor, pca_model) -> torch.Tensor:
     return torch.stack(pca_list)
 
 
-def train_one_epoch(model, dataloader, loss_fn, optimizer, scheduler,
-                    device, scaler, use_amp, pca_model, grad_accum_steps):
+def train_one_epoch(
+    model,
+    dataloader,
+    loss_fn,
+    optimizer,
+    scheduler,
+    device,
+    scaler,
+    use_amp,
+    pca_model,
+    grad_accum_steps,
+    grad_clip_norm,
+):
     """Train for one epoch with gradient accumulation."""
     model.train()
     total_loss = 0.0
@@ -148,7 +192,7 @@ def train_one_epoch(model, dataloader, loss_fn, optimizer, scheduler,
         # Gradient accumulation: step optimizer every grad_accum_steps
         if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(dataloader):
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(),max_norm=grad_clip_norm)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -232,8 +276,28 @@ def main():
 
     # --- Load data ---
     print("\n=== Loading dataset ===")
-    train_dataset, pca_model = load_dataset(cfg, "train")
+    train_dataset, _ = load_dataset(cfg, "train")
     val_dataset, _ = load_dataset(cfg, "val")
+
+    # ---------------------------------------------------------
+    # Fit PCA ONLY on training data
+    # ---------------------------------------------------------
+    if cfg["dataset"]["name"] == "tallgrass":
+        train_data_for_pca, _ = train_dataset.get_al_composite()
+    elif cfg["dataset"]["name"] == "indian_pines":
+        train_data_for_pca = train_dataset.data
+    else:
+        train_data_for_pca = train_dataset.full_data
+
+    print("\n=== Fitting PCA on training data only ===")
+
+    _, pca_model = apply_pca(
+        train_data_for_pca,
+        n_components=cfg["dataset"]["pca_components"]
+    )
+
+    print("PCA fitted successfully.")
+
 
     # For single-sample datasets (e.g. full-scene HSI like Indian Pines),
     # repeat the dataset so each epoch has multiple gradient steps
@@ -338,16 +402,18 @@ def main():
 
     for epoch in range(1, epochs + 1):
         # Warmup: linearly increase LR for the first few epochs
-        if epoch <= warmup_epochs:
-            warmup_factor = epoch / warmup_epochs
-            for pg in optimizer.param_groups:
-                pg["lr"] = pg["initial_lr"] * warmup_factor if "initial_lr" in pg else pg["lr"]
+        # if epoch <= warmup_epochs:
+        #     warmup_factor = epoch / warmup_epochs
+        #     for pg in optimizer.param_groups:
+        #         pg["lr"] = pg["initial_lr"] * warmup_factor if "initial_lr" in pg else pg["lr"]
 
         epoch_start = time.time()
         train_metrics = train_one_epoch(
             model, train_loader, loss_fn, optimizer, scheduler,
             device, scaler, cfg["training"]["use_amp"] and device == "cuda",
-            pca_model, grad_accum,
+            pca_model, 
+            grad_accum, 
+            cfg["training"].get("grad_clip_norm", 1.0),
         )
         epoch_time = time.time() - epoch_start
 
