@@ -220,9 +220,22 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    if args.output_dir:
-        cfg["evaluation"]["output_dir"] = args.output_dir
-    os.makedirs(cfg["evaluation"]["output_dir"], exist_ok=True)
+
+    # Base directory for this dataset's active-learning experiments.
+    # For Tallgrass this becomes ./results_tallgrass
+    base_output_dir = args.output_dir or cfg["evaluation"]["output_dir"]
+
+    # If the config points to the supervised directory, move AL results
+    # one level up before creating strategy-specific directories.
+    if base_output_dir.endswith(os.path.join("results_tallgrass", "supervised")):
+        base_output_dir = os.path.dirname(base_output_dir)
+
+    active_learning_root = os.path.join(
+        base_output_dir,
+        "active_learning"
+    )
+
+    os.makedirs(active_learning_root, exist_ok=True)
 
     # --- Prepare data (shared across strategies) ---
     data = prepare_data(cfg)
@@ -237,14 +250,29 @@ def main():
 
     # --- Run experiments ---
     results_files = {}
+
     for strategy in strategies:
         print(f"\n{'='*60}")
         print(f"Running AL experiment: {strategy.upper()}")
         print(f"{'='*60}")
 
-        run_al_experiment(cfg, strategy, data)
+        # Each AL strategy gets its own isolated output directory.
+        strategy_output_dir = os.path.join(
+            active_learning_root,
+            strategy
+        )
+
+        os.makedirs(strategy_output_dir, exist_ok=True)
+
+        # Give this experiment its own output directory.
+        strategy_cfg = cfg.copy()
+        strategy_cfg["evaluation"] = cfg["evaluation"].copy()
+        strategy_cfg["evaluation"]["output_dir"] = strategy_output_dir
+
+        run_al_experiment(strategy_cfg, strategy, data)
+
         results_files[strategy.upper()] = os.path.join(
-            cfg["evaluation"]["output_dir"],
+            strategy_output_dir,
             f"al_results_{strategy}.json",
         )
 
@@ -254,7 +282,7 @@ def main():
         plot_annotation_efficiency(
             results_files=results_files,
             output_path=os.path.join(
-                cfg["evaluation"]["output_dir"],
+                active_learning_root,
                 "annotation_efficiency_comparison.pdf",
             ),
             title=f"Annotation Efficiency — {cfg['dataset']['name'].title()}",
