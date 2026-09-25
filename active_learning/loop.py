@@ -307,6 +307,8 @@ class ActiveLearningLoop:
                 "query_coords": coords_list,          # for dashboard
             }
             self.results["rounds"].append(round_result)
+            # Save results after every completed round
+            self._save_results()
 
             print(f"[Round {round_idx}] mIoU: {metrics['miou']:.4f}, "
                   f"labeled: {self.oracle.total_labeled}")
