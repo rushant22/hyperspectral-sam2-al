@@ -35,7 +35,9 @@ class SimulatedOracle:
         """
         Args:
             ground_truth: Full ground truth labels, shape (H, W).
-                Class 0 = background (these are never "labeled" by the oracle).
+                Class 0 = background.
+                Classes 1–C = actual target classes.
+                All valid ground-truth labels (0–C) can be returned by the oracle.
                 Classes 1–C = actual classes.
             initial_labeled_mask: (H, W) boolean — True = initially labeled pixels.
                 If None, no pixels are initially labeled.
@@ -109,8 +111,8 @@ class SimulatedOracle:
             Dict with:
               - "labels": (K,) tensor of class labels for queried pixels
               - "coords": (K, 2) tensor of coordinates (same as input)
-              - "num_new": int — number of newly labeled pixels (excludes
-                  pixels that were already labeled or are background)
+              - "num_new": int — number of newly labeled pixels
+                    (excludes only pixels that were already labeled or invalid)
         """
         self.current_round += 1
         K = len(query_coords)
@@ -119,11 +121,15 @@ class SimulatedOracle:
         rows, cols = query_coords[:, 0], query_coords[:, 1]
         labels = self.ground_truth[rows, cols]
 
-        # Track which ones are genuinely new labels (not already labeled, not background)
+        # Track genuinely new annotations.
+        # Background (class 0) is a valid annotation too.
+        # Only already-labeled pixels are excluded.
         new_mask = torch.zeros(K, dtype=torch.bool)
+
         for i in range(K):
             r, c = rows[i].item(), cols[i].item()
-            if not self.labeled_mask[r, c] and labels[i].item() > 0:
+
+            if not self.labeled_mask[r, c] and labels[i].item() >= 0:
                 self.labeled_mask[r, c] = True
                 new_mask[i] = True
 
