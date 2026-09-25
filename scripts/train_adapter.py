@@ -257,13 +257,77 @@ def evaluate(model, dataloader, num_classes, device, pca_model):
     }
 
 
+def save_training_log(
+    log_path,
+    cfg,
+    param_info,
+    training_log,
+    test_metrics=None,
+    total_training_time_seconds=None,
+):
+    """Save training history so it survives interruptions."""
+
+    epochs_log = []
+
+    for entry in training_log:
+        epochs_log.append({
+            "epoch": entry.get("epoch", 0),
+            "train_loss": entry.get("loss", 0.0),
+            "val_miou": entry.get("miou", 0.0),
+            "val_oa": entry.get("oa", 0.0),
+            "val_kappa": entry.get("kappa", 0.0),
+            "time": entry.get("time", 0.0),
+        })
+
+    output = {
+        "config": cfg,
+        "param_info": param_info,
+        "epochs": epochs_log,
+        "training_log": training_log,
+    }
+
+    if test_metrics is not None:
+        output["test_metrics"] = {
+            k: v
+            for k, v in test_metrics.items()
+            if k != "per_class_iou"
+        }
+
+        output["per_class_iou"] = {
+            str(k): v
+            for k, v in test_metrics["per_class_iou"].items()
+        }
+
+    if total_training_time_seconds is not None:
+        output["total_training_time_seconds"] = (
+            total_training_time_seconds
+        )
+
+    with open(log_path, "w") as f:
+        json.dump(
+            output,
+            f,
+            indent=2,
+            default=str
+        )
+
 def main():
     parser = argparse.ArgumentParser(description="Train with Spectral Adapter + LoRA")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--dataset", type=str, default=None,
-                        help="Override dataset name from config")
+                    help="Override dataset name from config")
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="auto",
+        default=None,
+        help=(
+            "Resume training from a checkpoint. "
+            "Use --resume to automatically load checkpoint_latest.pt, "
+            "or --resume PATH to specify a checkpoint."
+        ),
+    )
     args = parser.parse_args()
-
     cfg = load_config(args.config)
     if args.dataset:
         cfg["dataset"]["name"] = args.dataset
@@ -383,9 +447,80 @@ def main():
         scheduler = None
 
     scaler = torch.amp.GradScaler('cuda', enabled=cfg["training"]["use_amp"] and device == "cuda")
+    epochs = cfg["training"]["epochs"]
+    # ---------------------------------------------------------
+    # Checkpoint / resume configuration
+    # ---------------------------------------------------------
+    save_dir = cfg["evaluation"]["output_dir"]
+    os.makedirs(save_dir, exist_ok=True)
+
+    latest_checkpoint_path = os.path.join(
+        save_dir,
+        "checkpoint_latest.pt"
+    )
+
+    start_epoch = 1
+    best_miou = 0.0
+    patience_counter = 0
+    training_log = []
+
+    if args.resume is not None:
+
+        if args.resume == "auto":
+            resume_path = latest_checkpoint_path
+        else:
+            resume_path = args.resume
+
+        if not os.path.isfile(resume_path):
+            raise FileNotFoundError(
+                f"Resume checkpoint not found:\n{resume_path}"
+            )
+
+        print("\n=== Resuming training ===")
+        print(f"Checkpoint: {resume_path}")
+
+        checkpoint = torch.load(
+            resume_path,
+            map_location=device,
+            weights_only=False,
+        )
+
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
+            scheduler.load_state_dict(
+                checkpoint["scheduler_state_dict"]
+            )
+
+        if checkpoint.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(
+                checkpoint["scaler_state_dict"]
+            )
+
+        start_epoch = checkpoint["epoch"] + 1
+        best_miou = checkpoint.get("best_miou", 0.0)
+        patience_counter = checkpoint.get(
+            "patience_counter",
+            0
+        )
+        training_log = checkpoint.get(
+            "training_log",
+            []
+        )
+
+        print(
+            f"  Resuming from epoch {start_epoch}/{epochs}"
+        )
+        print(
+            f"  Previous best Val mIoU: {best_miou:.4f}"
+        )
+        print(
+            f"  Previous patience counter: {patience_counter}"
+        )
 
     # --- Training loop ---
-    epochs = cfg["training"]["epochs"]
+    
     patience = cfg["training"]["early_stopping_patience"]
     grad_accum = cfg["training"].get("grad_accumulation_steps", 1)
     warmup_epochs = cfg["training"].get("warmup_epochs", 5)
@@ -395,12 +530,17 @@ def main():
     print(f"  LR: {cfg['training']['learning_rate']} (adapter/LoRA), "
           f"{cfg['training'].get('decoder_lr', 5e-5)} (decoder)")
 
-    best_miou = 0.0
-    patience_counter = 0
-    training_log = []
+    resume_elapsed_time = 0.0
+
+    if args.resume is not None:
+        resume_elapsed_time = checkpoint.get(
+            "total_training_time_seconds",
+            0.0
+        )
+
     start_time = time.time()
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         # Warmup: linearly increase LR for the first few epochs
         # if epoch <= warmup_epochs:
         #     warmup_factor = epoch / warmup_epochs
@@ -438,13 +578,25 @@ def main():
                 patience_counter = 0
                 save_dir = cfg["evaluation"]["output_dir"]
                 os.makedirs(save_dir, exist_ok=True)
-                torch.save(model.state_dict(), os.path.join(save_dir, "adapter_best.pt"))
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "val_miou": best_miou,
+                        "model_state_dict": model.state_dict(),
+                    },
+                    os.path.join(save_dir, "adapter_best.pt"),
+                )
             else:
                 patience_counter += 1
                 max_checks = max(1, patience // 5)
                 if patience_counter >= max_checks:
-                    print(f"\nEarly stopping at epoch {epoch} (best mIoU: {best_miou:.4f})")
-                    break
+                    print(
+                        f"\nEarly stopping triggered at epoch {epoch} "
+                        f"(best mIoU: {best_miou:.4f})"
+                    )
+                    should_stop = True
+                else:
+                    should_stop = False
 
         # Log
         log_entry = {
@@ -452,6 +604,49 @@ def main():
             **train_metrics, **val_metrics,
         }
         training_log.append(log_entry)
+        # -----------------------------------------------------
+        # Save resumable checkpoint after every completed epoch
+        # -----------------------------------------------------
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": (
+                scheduler.state_dict()
+                if scheduler is not None
+                else None
+            ),
+            "scaler_state_dict": scaler.state_dict(),
+            "best_miou": best_miou,
+            "patience_counter": patience_counter,
+            "training_log": training_log,
+            "total_training_time_seconds": (
+                resume_elapsed_time
+                + (time.time() - start_time)
+            ),
+            "config": cfg,
+        }
+
+        torch.save(
+            checkpoint,
+            latest_checkpoint_path
+        )
+        save_training_log(
+            os.path.join(
+                save_dir,
+                "adapter_training_log.json"
+            ),
+            cfg,
+            param_info,
+            training_log,
+        )
+
+        print(
+            f"  [Checkpoint] Saved epoch {epoch} → "
+            f"{latest_checkpoint_path}"
+        )
+        if should_stop:
+            break
 
     total_time = time.time() - start_time
     print(f"\nTraining complete in {total_time:.0f}s ({total_time/60:.1f} min)")
@@ -464,9 +659,33 @@ def main():
         shuffle=False, num_workers=0,
     )
 
-    best_path = os.path.join(cfg["evaluation"]["output_dir"], "adapter_best.pt")
+    best_path = os.path.join(
+        cfg["evaluation"]["output_dir"],
+        "adapter_best.pt"
+    )
+
     if os.path.exists(best_path):
-        model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
+        best_checkpoint = torch.load(
+            best_path,
+            map_location=device,
+            weights_only=False,
+        )
+
+        if "model_state_dict" in best_checkpoint:
+            model.load_state_dict(
+                best_checkpoint["model_state_dict"]
+            )
+        else:
+            # Backward compatibility with older adapter_best.pt files
+            model.load_state_dict(best_checkpoint)
+
+        print(f"Loaded best model checkpoint: {best_path}")
+
+    else:
+        print(
+            "[WARNING] adapter_best.pt not found. "
+            "Using the current model weights for test evaluation."
+        )
 
     test_metrics = evaluate(model, test_loader, num_classes, device, pca_model)
 
@@ -482,31 +701,26 @@ def main():
             print(f"    {class_name}: {iou:.4f}")
     print(f"{'='*60}")
 
-    # --- Save training log ---
-    log_path = os.path.join(cfg["evaluation"]["output_dir"], "adapter_training_log.json")
-    # Build per-epoch list with standardized keys for dashboard compatibility
-    epochs_log = []
-    for entry in training_log:
-        epochs_log.append({
-            "epoch":      entry.get("epoch", 0),
-            "train_loss": entry.get("loss", 0.0),
-            "val_miou":   entry.get("miou", 0.0),
-            "val_oa":     entry.get("oa", 0.0),
-            "val_kappa":  entry.get("kappa", 0.0),
-            "time":       entry.get("time", 0.0),
-        })
-    with open(log_path, "w") as f:
-        json.dump({
-            "config": cfg,
-            "param_info": param_info,
-            "epochs": epochs_log,          # dashboard-compatible key
-            "training_log": training_log,  # legacy key (kept for backwards compat)
-            "test_metrics": {k: v for k, v in test_metrics.items() if k != "per_class_iou"},
-            "per_class_iou": {str(k): v for k, v in test_metrics["per_class_iou"].items()},
-            "total_training_time_seconds": total_time,
-        }, f, indent=2, default=str)
-    print(f"Training log saved to {log_path}")
+    # --- Save final training log ---
+    save_training_log(
+        os.path.join(
+            cfg["evaluation"]["output_dir"],
+            "adapter_training_log.json"
+        ),
+        cfg,
+        param_info,
+        training_log,
+        test_metrics=test_metrics,
+        total_training_time_seconds=(
+            resume_elapsed_time
+            + (time.time() - start_time)
+        ),
+    )
 
+    print(
+        "Training log saved to "
+        f"{cfg['evaluation']['output_dir']}/adapter_training_log.json"
+    )
 
 if __name__ == "__main__":
     main()
