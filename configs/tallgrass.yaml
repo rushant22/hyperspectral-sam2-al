@@ -44,11 +44,12 @@ lora:
 # ---- Spectral Cross-Attention Adapter ----
 adapter:
   enabled: true
-  num_queries: 12                    # 12 biochemical-response queries (VNIR-SWIR)
+  num_queries: 12
   d_model: 256
   num_heads: 8
   ffn_dim: 512
   dropout: 0.1
+  pixel_chunk_size: 128
   use_residual: true
 
 # ---- Multi-Class Segmentation Head ----

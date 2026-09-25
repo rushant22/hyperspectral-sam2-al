@@ -408,6 +408,7 @@ def build_model(cfg: dict, num_bands: int, num_classes: int, pca_model=None) -> 
             "num_heads": cfg.get("adapter", {}).get("num_heads", 8),
             "ffn_dim": cfg.get("adapter", {}).get("ffn_dim", 512),
             "dropout": cfg.get("adapter", {}).get("dropout", 0.1),
+            "pixel_chunk_size": cfg.get("adapter", {}).get("pixel_chunk_size", 128),
         },
         lora_cfg={
             "rank": cfg.get("lora", {}).get("rank", 8),
