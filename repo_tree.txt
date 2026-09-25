@@ -1,0 +1,147 @@
+Folder PATH listing
+Volume serial number is 2A9A-A3A2
+C:.
+|   .gitignore
+|   README.md
+|   repo_tree.txt
+|   requirements.txt
+|   
++---active_learning
+|   |   loop.py
+|   |   query_strategies.py
+|   |   simulated_oracle.py
+|   |   uncertainty.py
+|   |   __init__.py
+|   |   
+|   \---__pycache__
+|           loop.cpython-313.pyc
+|           query_strategies.cpython-313.pyc
+|           simulated_oracle.cpython-313.pyc
+|           uncertainty.cpython-313.pyc
+|           __init__.cpython-313.pyc
+|           
++---checkpoints
+|       sam2.1_hiera_base_plus.pt
+|       
++---configs
+|       default.yaml
+|       indian_pines.yaml
+|       smoke_test.yaml
+|       
++---data
+|   |   download.py
+|   |   indian_pines.py
+|   |   pavia.py
+|   |   transforms.py
+|   |   utils.py
+|   |   __init__.py
+|   |   
+|   \---__pycache__
+|           indian_pines.cpython-313.pyc
+|           pavia.cpython-313.pyc
+|           transforms.cpython-313.pyc
+|           utils.cpython-313.pyc
+|           __init__.cpython-313.pyc
+|           
++---datasets
+|   +---indian_pines
+|   |       Indian_pines_corrected.mat
+|   |       Indian_pines_gt.mat
+|   |       
+|   \---pavia
+|           PaviaU.mat
+|           PaviaU_gt.mat
+|           
++---documentation
+|       AL_HSI_SAM2_Project_Documentation.docx
+|       RESULTS_SUMMARY.md
+|       
++---evaluation
+|   |   metrics.py
+|   |   plots.py
+|   |   __init__.py
+|   |   
+|   \---__pycache__
+|           metrics.cpython-313.pyc
+|           plots.cpython-313.pyc
+|           __init__.cpython-313.pyc
+|           
++---models
+|   |   lora.py
+|   |   losses.py
+|   |   sam2_wrapper.py
+|   |   spectral_adapter.py
+|   |   __init__.py
+|   |   
+|   \---__pycache__
+|           lora.cpython-313.pyc
+|           losses.cpython-313.pyc
+|           sam2_wrapper.cpython-313.pyc
+|           spectral_adapter.cpython-313.pyc
+|           __init__.cpython-313.pyc
+|           
++---notebooks
+|       colab_runner.ipynb
+|       
++---paper
+|   \---figures
+|           .gitkeep
+|           ablation_summary.png
+|           annotation_efficiency_comparison.png
+|           per_class_iou.png
+|           training_curves.png
+|           
++---results
+|   |   ablation_results.json
+|   |   adapter_best.pt
+|   |   adapter_training_log.json
+|   |   al_results_bald.json
+|   |   al_results_entropy.json
+|   |   al_results_random.json
+|   |   annotation_efficiency_comparison.pdf
+|   |   baseline_best.pt
+|   |   
+|   \---smoke_test
+|           ablation_results.json
+|           adapter_best.pt
+|           adapter_training_log.json
+|           al_results_random.json
+|           baseline_best.pt
+|           
++---scripts
+|       add_export_cells.py
+|       generate_dashboard_data.py
+|       read_results3.py
+|       run_ablations.py
+|       run_al_loop.py
+|       smoke_test.py
+|       train_adapter.py
+|       train_baseline.py
+|       
++---verification_workspace
+|       live_verify.py
+|       
+\---visualization
+    |   export_results.py
+    |   
+    \---dashboard
+        |   .gitkeep
+        |   app.js
+        |   index.html
+        |   styles.css
+        |   
+        \---data
+            +---indian_pines
+            |       false_color.json
+            |       metrics_summary.json
+            |       query_history.json
+            |       segmentation_map.json
+            |       uncertainty_map.json
+            |       
+            \---pavia
+                    false_color.json
+                    metrics_summary.json
+                    query_history.json
+                    segmentation_map.json
+                    uncertainty_map.json
+                    
