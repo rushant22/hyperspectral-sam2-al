@@ -64,7 +64,14 @@ def quick_train_eval(cfg: dict, label: str) -> dict:
         device = "cpu"
 
     dataset_name = cfg["dataset"]["name"]
-    root_dir = os.path.join(cfg["dataset"]["root_dir"], dataset_name)
+
+    # Tallgrass config already points directly to the Flight 017 dataset root.
+    # Benchmark datasets still use the traditional datasets/<dataset_name> layout.
+    if dataset_name == "tallgrass":
+        root_dir = cfg["dataset"]["root_dir"]
+    else:
+        root_dir = os.path.join(cfg["dataset"]["root_dir"], dataset_name)
+
     target_size = cfg["dataset"]["sam2_input_size"]
 
     # Load datasets
@@ -325,9 +332,23 @@ def main():
     args = parser.parse_args()
 
     base_cfg = load_config(args.config)
-    output_dir = base_cfg["evaluation"]["output_dir"]
-    os.makedirs(output_dir, exist_ok=True)
 
+    # Keep ablation results separate from supervised training results.
+    output_dir = base_cfg["evaluation"]["output_dir"]
+
+    if output_dir.endswith(os.path.join("results_tallgrass", "supervised")):
+        output_dir = os.path.join(
+            os.path.dirname(output_dir),
+            "ablations"
+        )
+
+    # IMPORTANT:
+    # Pass the isolated ablation directory back into the config.
+    # Individual ablation functions read cfg["evaluation"]["output_dir"].
+    base_cfg["evaluation"]["output_dir"] = output_dir
+
+    os.makedirs(output_dir, exist_ok=True)
+    
     # Determine which ablations to run
     if args.ablation:
         ablations_to_run = {args.ablation: ABLATIONS[args.ablation]}
