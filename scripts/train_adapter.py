@@ -541,6 +541,7 @@ def main():
     start_time = time.time()
 
     for epoch in range(start_epoch, epochs + 1):
+        should_stop = False
         # Warmup: linearly increase LR for the first few epochs
         # if epoch <= warmup_epochs:
         #     warmup_factor = epoch / warmup_epochs
