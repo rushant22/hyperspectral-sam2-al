@@ -364,14 +364,28 @@ class AdaptedSAM2(nn.Module):
         Normally, dropout is disabled during model.eval(). For MC-Dropout,
         we need dropout active even during inference to get stochastic
         predictions. This method selectively enables dropout layers while
-        keeping batch norm in eval mode (so running stats are used, not batch stats).
+        keeping batch norm in eval mode.
         """
-        self.eval()  # First, set everything to eval mode
+        self.eval()
 
-        # Then re-enable dropout layers specifically
-        for module in self.modules():
-            if isinstance(module, nn.Dropout):
-                module.train()
+        # Enable dropout only in the trainable adaptation components.
+        stochastic_modules = [
+            self.spectral_adapter,
+            self.seg_head,
+        ]
+
+        # LoRA modules live inside the SAM2 encoder, so include only
+        # dropout modules belonging to LoRA/adaptation layers.
+        for root in stochastic_modules:
+            if root is not None:
+                for module in root.modules():
+                    if isinstance(module, nn.Dropout):
+                        module.train()
+
+        if self.sam2_encoder is not None:
+            for name, module in self.sam2_encoder.named_modules():
+                if "lora" in name.lower() and isinstance(module, nn.Dropout):
+                    module.train()
 
     def get_adapter_attention_maps(self, hsi: torch.Tensor) -> torch.Tensor:
         """

@@ -53,6 +53,7 @@ class ActiveLearningLoop:
         test_labels: torch.Tensor,
         pca_rgb: Optional[torch.Tensor],
         vegetation_mask: torch.Tensor,
+        train_pool_mask: torch.Tensor,
         cfg: dict,
         device: str = "cuda",
         output_dir: str = "./results",
@@ -75,8 +76,36 @@ class ActiveLearningLoop:
         self.test_labels = test_labels
         self.pca_rgb = pca_rgb
         self.vegetation_mask = vegetation_mask
+        self.train_pool_mask = train_pool_mask.bool()
         self.device = device
         self.output_dir = output_dir
+        # Tallgrass AL composite is a horizontal strip of 128x128 patches.
+        # Store patch width/height so model inference can be performed
+        # patch-by-patch instead of sending the entire 128x6400 strip
+        # through SAM2 at once.
+        self.patch_h = self.full_data.shape[1]
+        self.patch_w = 128
+
+        if self.patch_h != 128:
+            raise ValueError(
+                f"Expected Tallgrass AL composite height 128, "
+                f"got {self.patch_h}"
+            )
+
+        if self.full_data.shape[2] % self.patch_w != 0:
+            raise ValueError(
+                f"Composite width {self.full_data.shape[2]} "
+                f"is not divisible by patch width {self.patch_w}."
+            )
+
+        self.num_patches = (
+            self.full_data.shape[2] // self.patch_w
+        )
+
+        if self.train_pool_mask.shape != self.full_labels.shape:
+            raise ValueError(
+                "train_pool_mask shape must match full_labels shape."
+            )
 
         # AL parameters from config
         al_cfg = cfg.get("active_learning", {})
@@ -105,11 +134,36 @@ class ActiveLearningLoop:
             "strategy": self.strategy,
         }
 
-        # Compute number of query pixels per round
-        # Use ALL labeled (non-background) pixels, not just vegetation, to
-        # avoid the query budget being 0 when the vegetation mask is too strict.
-        n_total = full_labels.numel()
-        self.query_budget = max(10, int(n_total * self.query_fraction))
+        # Compute the query budget ONLY from the eligible geographic
+        # training pool.
+        #
+        # Valid labels:
+        #   0  = Background
+        #   1  = Sericea
+        #  -1  = Ignore
+        #
+        # Background is a valid segmentation class, so it must remain
+        # eligible for active learning.
+        eligible_train_pixels = (
+            self.train_pool_mask
+            & (self.full_labels >= 0)
+        )
+
+        n_train_pool = int(
+            eligible_train_pixels.sum().item()
+        )
+
+        if n_train_pool == 0:
+            raise RuntimeError(
+                "No eligible pixels found in the geographic training pool."
+            )
+
+        self.n_train_pool = n_train_pool
+
+        self.query_budget = max(
+            10,
+            int(n_train_pool * self.query_fraction),
+        )
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -129,8 +183,47 @@ class ActiveLearningLoop:
         self.model.to(self.device)
 
         # --- Initialize labeled pool ---
-        labeled_mask = self.oracle.initialize_random_labels(
-            self.initial_fraction, seed=42
+        # Initial labels are sampled ONLY from the geographic training pool.
+        # Validation and test pixels can never enter the labeled pool.
+        eligible_train_pixels = (
+            self.train_pool_mask
+            & (self.full_labels >= 0)
+        )
+
+        eligible_indices = torch.nonzero(
+            eligible_train_pixels,
+            as_tuple=False,
+        )
+
+        n_initial = max(
+            1,
+            int(len(eligible_indices) * self.initial_fraction),
+        )
+
+        generator = torch.Generator().manual_seed(42)
+
+        permutation = torch.randperm(
+            len(eligible_indices),
+            generator=generator,
+        )[:n_initial]
+
+        selected = eligible_indices[permutation]
+
+        labeled_mask = torch.zeros_like(
+            self.full_labels,
+            dtype=torch.bool,
+        )
+
+        labeled_mask[
+            selected[:, 0],
+            selected[:, 1],
+        ] = True
+
+        # Keep the simulated oracle synchronized with our
+        # geographically restricted labeled pool.
+        self.oracle.labeled_mask = labeled_mask.clone()
+        self.oracle.total_labeled = int(
+            labeled_mask.sum().item()
         )
 
         # --- Evaluate initial model (before any AL) ---
@@ -164,7 +257,11 @@ class ActiveLearningLoop:
 
             # Emergency fallback: ensure AL never gets 0 new labels if unlabeled pixels remain
             if oracle_result["num_new"] == 0:
-                valid_pool_mask = (self.oracle.ground_truth > 0) & (~self.oracle.labeled_mask)
+                valid_pool_mask = (
+                    self.train_pool_mask
+                    & (self.oracle.ground_truth >= 0)
+                    & (~self.oracle.labeled_mask)
+                )
                 pool_coords = torch.nonzero(valid_pool_mask)
                 if len(pool_coords) > 0:
                     min_budget = max(10, self.query_budget // 5)
@@ -178,7 +275,10 @@ class ActiveLearningLoop:
                     self.oracle.total_labeled = self.oracle.labeled_mask.sum().item()
                     oracle_result["num_new"] += n_emerg
                     query_coords = torch.cat([query_coords, extra], dim=0) if len(query_coords) > 0 else extra
-                    print(f"  [AL] Emergency top-up: added {n_emerg} valid non-background pixels.")
+                    print(
+                        f"  [AL] Emergency top-up: added "
+                        f"{n_emerg} valid training-pool pixels."
+                    )
 
             # Step 5: Evaluate on test set
             metrics = self._evaluate_on_test()
@@ -220,84 +320,218 @@ class ActiveLearningLoop:
         """
         Train the model on the current labeled set for one AL round.
 
-        Uses the training labels where unlabeled pixels have label = -1
-        (ignored by the loss function).
+        The AL composite is a horizontal strip of 128x128 patches.
+        Training is therefore performed patch-by-patch so that SAM2
+        always receives the same spatial input size used during
+        supervised training.
         """
         from models.losses import FocalDiceLoss
 
         self.model.train()
         self.model.to(self.device)
 
-        # Prepare input tensors
-        hsi = self.full_data.unsqueeze(0).to(self.device)  # (1, B, H, W)
-        labels = training_labels.unsqueeze(0).to(self.device)  # (1, H, W)
-        pca = None
-        if self.pca_rgb is not None:
-            pca = self.pca_rgb.unsqueeze(0).to(self.device)  # (1, 3, H, W)
-
-        # Loss and optimizer
         loss_fn = FocalDiceLoss(ignore_index=-1)
+
         optimizer = optim.AdamW(
             filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
 
-        # AMP scaler for mixed precision
-        scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
+        scaler = torch.amp.GradScaler(
+            'cuda',
+            enabled=self.use_amp,
+        )
 
         best_loss = float("inf")
         patience_counter = 0
         patience = 10
 
+        # Number of patches in the horizontal composite.
+        num_patches = self.full_data.shape[2] // self.patch_w
+
         for epoch in range(self.retrain_epochs):
-            optimizer.zero_grad()
+            epoch_loss = 0.0
+            n_used = 0
 
-            with torch.amp.autocast('cuda', enabled=self.use_amp):
-                output = self.model(hsi, pca)
-                logits = output["logits"]  # (1, C, H, W)
+            # Shuffle patch order so training does not always see
+            # patches in exactly the same sequence.
+            patch_order = torch.randperm(num_patches)
 
-                # Resize logits to match label size if needed
-                if logits.shape[2:] != labels.shape[1:]:
-                    logits = nn.functional.interpolate(
-                        logits, size=labels.shape[1:], mode="bilinear",
-                        align_corners=False,
+            for patch_idx in patch_order.tolist():
+
+                col_start = patch_idx * self.patch_w
+                col_end = col_start + self.patch_w
+
+                # HSI patch: (B, 128, 128)
+                hsi_patch = self.full_data[
+                    :,
+                    :,
+                    col_start:col_end,
+                ]
+
+                # Label patch: (128, 128)
+                label_patch = training_labels[
+                    :,
+                    col_start:col_end,
+                ]
+
+                # Skip patches that contain no currently labeled pixels.
+                if not torch.any(label_patch >= 0):
+                    continue
+
+                hsi = hsi_patch.unsqueeze(0).to(self.device)
+                labels = label_patch.unsqueeze(0).to(self.device)
+
+                pca = None
+
+                if self.pca_rgb is not None:
+                    pca_patch = self.pca_rgb[
+                        :,
+                        :,
+                        col_start:col_end,
+                    ]
+
+                    pca = pca_patch.unsqueeze(0).to(self.device)
+
+                optimizer.zero_grad()
+
+                with torch.amp.autocast(
+                    'cuda',
+                    enabled=self.use_amp,
+                ):
+                    output = self.model(hsi, pca)
+                    logits = output["logits"]
+
+                    if logits.shape[2:] != labels.shape[1:]:
+                        logits = nn.functional.interpolate(
+                            logits,
+                            size=labels.shape[1:],
+                            mode="bilinear",
+                            align_corners=False,
+                        )
+
+                    loss_dict = loss_fn(
+                        logits,
+                        labels,
                     )
 
-                loss_dict = loss_fn(logits, labels)
-                loss = loss_dict["total"]
+                    loss = loss_dict["total"]
 
-            scaler.scale(loss).backward()
-            # Gradient clipping for stability
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), max_norm=1.0
-            )
-            scaler.step(optimizer)
-            scaler.update()
+                scaler.scale(loss).backward()
 
-            # Simple early stopping
-            if loss.item() < best_loss - 1e-4:
-                best_loss = loss.item()
+                scaler.unscale_(optimizer)
+
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=1.0,
+                )
+
+                scaler.step(optimizer)
+                scaler.update()
+
+                epoch_loss += loss.item()
+                n_used += 1
+
+            if n_used == 0:
+                print(
+                    f"  WARNING: Round {round_idx}, epoch {epoch+1}: "
+                    f"no labeled patches available."
+                )
+                break
+
+            epoch_loss /= n_used
+
+            # Simple early stopping.
+            if epoch_loss < best_loss - 1e-4:
+                best_loss = epoch_loss
                 patience_counter = 0
             else:
                 patience_counter += 1
+
                 if patience_counter >= patience:
                     break
 
-        print(f"  Trained for {epoch+1} epochs, final loss: {loss.item():.4f}")
+        print(
+            f"  Trained for {epoch+1} epochs, "
+            f"final loss: {epoch_loss:.4f}"
+        )
 
     def _compute_uncertainty(self) -> Dict[str, torch.Tensor]:
-        """Run MC-Dropout inference to get uncertainty maps."""
-        hsi = self.full_data.unsqueeze(0)  # (1, B, H, W)
-        pca = self.pca_rgb.unsqueeze(0) if self.pca_rgb is not None else None
+        """
+        Compute MC-Dropout uncertainty patch-by-patch.
 
-        uncertainty = mc_dropout_inference(
-            self.model, hsi, pca,
-            num_passes=self.mc_passes,
-            device=self.device,
+        Each 128x128 patch is passed independently through SAM2.
+        The resulting uncertainty maps are then reconstructed into
+        the horizontal AL composite coordinate system.
+        """
+
+        num_classes = self.model.num_classes
+        height = self.full_data.shape[1]
+        total_width = self.full_data.shape[2]
+
+        entropy_map = torch.zeros(
+            height,
+            total_width,
+            dtype=torch.float32,
         )
-        return uncertainty
+
+        bald_map = torch.zeros(
+            height,
+            total_width,
+            dtype=torch.float32,
+        )
+
+        num_patches = total_width // self.patch_w
+
+        for patch_idx in tqdm(
+            range(num_patches),
+            desc="MC-Dropout uncertainty",
+        ):
+            col_start = patch_idx * self.patch_w
+            col_end = col_start + self.patch_w
+
+            hsi_patch = self.full_data[
+                :,
+                :,
+                col_start:col_end,
+            ]
+
+            hsi = hsi_patch.unsqueeze(0)
+
+            pca = None
+
+            if self.pca_rgb is not None:
+                pca_patch = self.pca_rgb[
+                    :,
+                    :,
+                    col_start:col_end,
+                ]
+
+                pca = pca_patch.unsqueeze(0)
+
+            uncertainty = mc_dropout_inference(
+                self.model,
+                hsi,
+                pca,
+                num_passes=self.mc_passes,
+                device=self.device,
+            )
+
+            entropy_map[
+                :,
+                col_start:col_end,
+            ] = uncertainty["entropy"].squeeze(0).cpu()
+
+            bald_map[
+                :,
+                col_start:col_end,
+            ] = uncertainty["bald"].squeeze(0).cpu()
+
+        return {
+            "entropy": entropy_map,
+            "bald": bald_map,
+        }
 
     def _select_queries(
         self,
@@ -313,16 +547,38 @@ class ActiveLearningLoop:
         so the AL loop never stalls at 0 new labels.
         """
 
-        # Check how many vegetation+unlabeled pixels are available
-        veg = self.vegetation_mask
-        if veg is not None:
-            n_veg_unlabeled = (veg & (~labeled_mask)).sum().item()
+        # Candidate pixels must ALWAYS come from the geographic
+        # training pool. Validation and test pixels are never queried.
+        train_unlabeled_mask = (
+            self.train_pool_mask
+            & (self.full_labels >= 0)
+            & (~labeled_mask)
+        )
+
+        # Start with the geographic training pool.
+        veg = train_unlabeled_mask.clone()
+
+        # If a vegetation mask exists, restrict candidates further.
+        if self.vegetation_mask is not None:
+            veg = (
+                train_unlabeled_mask
+                & self.vegetation_mask.bool()
+            )
+
+            n_veg_unlabeled = int(
+                veg.sum().item()
+            )
+
             if n_veg_unlabeled < self.query_budget:
-                print(f"  [AL] WARNING: vegetation mask leaves only "
-                      f"{n_veg_unlabeled} candidates "
-                      f"(budget={self.query_budget}). "
-                      f"Falling back to all unlabeled pixels.")
-                veg = None  # ignore vegetation mask for this round
+                print(
+                    f"  [AL] WARNING: vegetation mask leaves only "
+                    f"{n_veg_unlabeled} training-pool candidates "
+                    f"(budget={self.query_budget}). "
+                    f"Falling back to all eligible training-pool pixels."
+                )
+
+                # Fall back ONLY to the geographic training pool.
+                veg = train_unlabeled_mask
 
         if self.strategy == "random":
             query_coords = random_query(
@@ -374,62 +630,192 @@ class ActiveLearningLoop:
         # picks land on background or already-dense areas.
         min_budget = max(10, self.query_budget // 5)
         gt = self.oracle.ground_truth
+
         if len(query_coords) > 0:
             r = query_coords[:, 0]
             c = query_coords[:, 1]
-            valid_new = (gt[r, c] > 0) & (~labeled_mask[r, c])
-            n_valid = valid_new.sum().item()
+
+            valid_new = (
+                self.train_pool_mask[r, c]
+                & (gt[r, c] >= 0)
+                & (~labeled_mask[r, c])
+            )
+
+            n_valid = int(
+                valid_new.sum().item()
+            )
         else:
             n_valid = 0
 
         if n_valid < min_budget:
             shortfall = min_budget - n_valid
-            valid_pool_mask = (gt > 0) & (~labeled_mask)
+
+            # Top-up candidates must remain inside the geographic
+            # training pool and must have valid labels.
+            valid_pool_mask = (
+                self.train_pool_mask
+                & (gt >= 0)
+                & (~labeled_mask)
+            )
+
             if len(query_coords) > 0:
-                valid_pool_mask[query_coords[:, 0], query_coords[:, 1]] = False
-            pool_coords = torch.nonzero(valid_pool_mask)
+                valid_pool_mask[
+                    query_coords[:, 0],
+                    query_coords[:, 1],
+                ] = False
+
+            pool_coords = torch.nonzero(
+                valid_pool_mask
+            )
+
             if len(pool_coords) > 0:
-                n_sample = min(shortfall, len(pool_coords))
-                g = torch.Generator().manual_seed(42 + round_idx * 1000)
-                perm = torch.randperm(len(pool_coords), generator=g)[:n_sample]
+                n_sample = min(
+                    shortfall,
+                    len(pool_coords),
+                )
+
+                g = torch.Generator().manual_seed(
+                    42 + round_idx * 1000
+                )
+
+                perm = torch.randperm(
+                    len(pool_coords),
+                    generator=g,
+                )[:n_sample]
+
                 extra_coords = pool_coords[perm]
-                query_coords = torch.cat([query_coords, extra_coords], dim=0) if len(query_coords) > 0 else extra_coords
-                print(f"  [AL] Top-up guarantee: added {n_sample} random non-background pixels "
-                      f"(projected new: {n_valid + n_sample}, min_budget={min_budget})")
+
+                query_coords = (
+                    torch.cat(
+                        [query_coords, extra_coords],
+                        dim=0,
+                    )
+                    if len(query_coords) > 0
+                    else extra_coords
+                )
+
+                print(
+                    f"  [AL] Top-up guarantee: added "
+                    f"{n_sample} random training-pool pixels "
+                    f"(projected new: "
+                    f"{n_valid + n_sample}, "
+                    f"min_budget={min_budget})"
+                )
+            
 
         return query_coords
 
     def _evaluate_on_test(self) -> Dict:
-        """Evaluate model on the test set."""
+        """
+        Evaluate the model patch-by-patch on the geographic test patches.
+
+        The predictions are reconstructed into the same horizontal
+        composite coordinate system used by test_labels.
+        """
+
         self.model.eval()
 
-        with torch.no_grad():
-            hsi = self.full_data.unsqueeze(0).to(self.device)
-            pca = self.pca_rgb.unsqueeze(0).to(self.device) if self.pca_rgb is not None else None
-            output = self.model(hsi, pca)
-            logits = output["logits"]
+        height = self.full_data.shape[1]
+        total_width = self.full_data.shape[2]
 
-            # Resize if needed
-            if logits.shape[2:] != self.test_labels.shape:
-                logits = nn.functional.interpolate(
-                    logits, size=self.test_labels.shape, mode="bilinear",
-                    align_corners=False,
+        pred = torch.zeros(
+            height,
+            total_width,
+            dtype=torch.long,
+        )
+
+        num_patches = total_width // self.patch_w
+
+        with torch.no_grad():
+
+            for patch_idx in range(num_patches):
+
+                col_start = patch_idx * self.patch_w
+                col_end = col_start + self.patch_w
+
+                # Skip patches that contain no test pixels.
+                test_patch = self.test_labels[
+                    :,
+                    col_start:col_end,
+                ]
+
+                if not torch.any(test_patch >= 0):
+                    continue
+
+                hsi_patch = self.full_data[
+                    :,
+                    :,
+                    col_start:col_end,
+                ]
+
+                hsi = hsi_patch.unsqueeze(0).to(self.device)
+
+                pca = None
+
+                if self.pca_rgb is not None:
+                    pca_patch = self.pca_rgb[
+                        :,
+                        :,
+                        col_start:col_end,
+                    ]
+
+                    pca = pca_patch.unsqueeze(0).to(self.device)
+
+                output = self.model(
+                    hsi,
+                    pca,
                 )
 
-            pred = logits.squeeze(0).argmax(dim=0).cpu()  # (H, W)
+                logits = output["logits"]
 
-        # Compute metrics only on test pixels (test_labels != -1)
+                if logits.shape[2:] != test_patch.shape:
+                    logits = nn.functional.interpolate(
+                        logits,
+                        size=test_patch.shape,
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+
+                patch_pred = (
+                    logits
+                    .squeeze(0)
+                    .argmax(dim=0)
+                    .cpu()
+                )
+
+                pred[
+                    :,
+                    col_start:col_end,
+                ] = patch_pred
+
+        # Evaluate ONLY geographic test pixels.
         valid = self.test_labels >= 0
+
         if valid.sum() == 0:
-            return {"miou": 0.0, "per_class_iou": {}}
+            return {
+                "miou": 0.0,
+                "per_class_iou": {},
+            }
 
         pred_valid = pred[valid]
         gt_valid = self.test_labels[valid]
 
-        miou = compute_miou(pred_valid, gt_valid, self.model.num_classes)
-        per_class = compute_per_class_iou(pred_valid, gt_valid, self.model.num_classes)
+        miou = compute_miou(
+            pred_valid,
+            gt_valid,
+            self.model.num_classes,
+        )
 
-        return {"miou": miou, "per_class_iou": per_class}
+        per_class = compute_per_class_iou(
+            pred_valid,
+            gt_valid,
+            self.model.num_classes,
+        )
+
+        return {
+            "miou": miou,
+            "per_class_iou": per_class,
+        }
 
     def _save_results(self):
         """Save AL results to JSON for later plotting."""

@@ -914,6 +914,100 @@ class TallgrassDataset(Dataset):
 
         return full_data, full_labels
 
+
+    def get_al_split_masks(self) -> Dict[str, np.ndarray]:
+        """
+        Create geographic train/validation/test masks aligned with
+        the horizontal active-learning composite.
+
+        The composite ordering is identical to get_al_composite():
+        patches are placed left-to-right in self.patches order.
+
+        Returns:
+            Dictionary containing:
+
+                "train_pool_mask":
+                    Boolean mask for pixels belonging to geographic
+                    training patches.
+
+                "val_mask":
+                    Boolean mask for pixels belonging to geographic
+                    validation patches.
+
+                "test_mask":
+                    Boolean mask for pixels belonging to geographic
+                    test patches.
+
+        IMPORTANT:
+            These masks are based on patch-level geographic assignment,
+            not random pixel sampling.
+        """
+
+        if self.split is not None:
+            raise ValueError(
+                "get_al_split_masks() must be called on "
+                "TallgrassDataset(split=None)."
+            )
+
+        n = len(self.patches)
+
+        height = self.patch_h
+        total_width = self.patch_w * n
+
+        train_pool_mask = np.zeros(
+            (height, total_width),
+            dtype=bool,
+        )
+
+        val_mask = np.zeros(
+            (height, total_width),
+            dtype=bool,
+        )
+
+        test_mask = np.zeros(
+            (height, total_width),
+            dtype=bool,
+        )
+
+        for i, patch_info in enumerate(self.patches):
+
+            col_start = i * self.patch_w
+            col_end = col_start + self.patch_w
+
+            split_name = self.row_to_split[
+                patch_info["row_start"]
+            ]
+
+            if split_name == "train":
+                train_pool_mask[
+                    :,
+                    col_start:col_end,
+                ] = True
+
+            elif split_name == "val":
+                val_mask[
+                    :,
+                    col_start:col_end,
+                ] = True
+
+            elif split_name == "test":
+                test_mask[
+                    :,
+                    col_start:col_end,
+                ] = True
+
+            else:
+                raise RuntimeError(
+                    f"Unknown split '{split_name}' "
+                    f"for row {patch_info['row_start']}"
+                )
+
+        return {
+            "train_pool_mask": train_pool_mask,
+            "val_mask": val_mask,
+            "test_mask": test_mask,
+        }
+
     def get_full_image(
         self,
     ) -> Tuple[np.ndarray, np.ndarray]:

@@ -62,7 +62,11 @@ def prepare_data(cfg: dict):
       - pca_model: fitted PCA model
     """
     dataset_name = cfg["dataset"]["name"]
-    root_dir = os.path.join(cfg["dataset"]["root_dir"], dataset_name)
+
+    if dataset_name == "tallgrass":
+        root_dir = cfg["dataset"]["root_dir"]
+    else:
+        root_dir = os.path.join(cfg["dataset"]["root_dir"], dataset_name)
 
     print(f"\n=== Loading {dataset_name} dataset ===")
 
@@ -113,28 +117,92 @@ def prepare_data(cfg: dict):
     print(f"  Vegetation mask: {vegetation_mask.sum().item()} / {vegetation_mask.numel()} pixels "
           f"({100*vegetation_mask.float().mean():.1f}%) above NDVI threshold {ndvi_threshold}")
 
-    # --- Create test split labels ---
-    # Use the dataset's split mechanism to get test pixel mask
-    rng = np.random.RandomState(cfg["seed"])
-    test_labels = np.full(full_labels.shape, -1, dtype=np.int64)
-    ratios = (
-        cfg["dataset"]["train_ratio"],
-        cfg["dataset"]["val_ratio"],
-        cfg["dataset"]["test_ratio"],
-    )
-    # Stratified test split
-    for class_id in range(1, num_classes):
-        class_pixels = np.argwhere(full_labels == class_id)
-        n = len(class_pixels)
-        if n == 0:
-            continue
-        indices = rng.permutation(n)
-        n_train = max(1, int(n * ratios[0]))
-        n_val = max(1, int(n * ratios[1]))
-        test_idx = indices[n_train + n_val:]
-        for idx in test_idx:
-            r, c = class_pixels[idx]
-            test_labels[r, c] = full_labels[r, c]
+    # --- Create geographic train/test pool masks ---
+    #
+    # Tallgrass AL must use the same geographic split as the
+    # supervised experiment:
+    #   train = 34 patches
+    #   val   = 4 patches
+    #   test  = 12 patches
+    #
+    # The AL pool is restricted to the geographic TRAIN patches.
+    # The final test evaluation is restricted to the geographic TEST
+    # patches. Validation patches are not queried.
+
+    if dataset_name == "tallgrass":
+        # Tallgrass get_al_composite() creates a synthetic horizontal
+        # strip containing the 50 original 128x128 patches.
+        #
+        # get_al_split_masks() creates train/val/test masks in exactly
+        # the same composite coordinate system.
+
+        split_masks = dataset.get_al_split_masks()
+
+        train_pool_mask = torch.from_numpy(
+            split_masks["train_pool_mask"]
+        ).bool()
+
+        test_mask = split_masks["test_mask"]
+
+        test_labels = np.full(
+            full_labels.shape,
+            -1,
+            dtype=np.int64
+        )
+
+        test_labels[test_mask] = full_labels[test_mask]
+
+        print(
+            f"  AL training pool: "
+            f"{train_pool_mask.sum().item()} valid pixels"
+        )
+
+        print(
+            f"  AL test pool: "
+            f"{(test_labels >= 0).sum()} valid pixels"
+        )
+
+        print(
+            f"  AL validation pool: "
+            f"{split_masks['val_mask'].sum()} valid pixels"
+        )
+    else:
+        # Preserve the original pixel-level stratified split
+        # for Indian Pines / Pavia.
+        rng = np.random.RandomState(cfg["seed"])
+        test_labels = np.full(full_labels.shape, -1, dtype=np.int64)
+        train_pool_mask = np.zeros(full_labels.shape, dtype=bool)
+
+        ratios = (
+            cfg["dataset"]["train_ratio"],
+            cfg["dataset"]["val_ratio"],
+            cfg["dataset"]["test_ratio"],
+        )
+
+        for class_id in range(1, num_classes):
+            class_pixels = np.argwhere(full_labels == class_id)
+            n = len(class_pixels)
+
+            if n == 0:
+                continue
+
+            indices = rng.permutation(n)
+
+            n_train = max(1, int(n * ratios[0]))
+            n_val = max(1, int(n * ratios[1]))
+
+            train_idx = indices[:n_train]
+            test_idx = indices[n_train + n_val:]
+
+            for idx in train_idx:
+                r, c = class_pixels[idx]
+                train_pool_mask[r, c] = True
+
+            for idx in test_idx:
+                r, c = class_pixels[idx]
+                test_labels[r, c] = full_labels[r, c]
+
+        train_pool_mask = torch.from_numpy(train_pool_mask)
 
     # --- Convert to tensors ---
     # Data: (H, W, B) → (B, H, W)
@@ -152,6 +220,7 @@ def prepare_data(cfg: dict):
         "full_data": full_data_tensor,
         "full_labels": full_labels_tensor,
         "test_labels": test_labels_tensor,
+        "train_pool_mask": train_pool_mask,
         "pca_rgb": pca_tensor,
         "vegetation_mask": vegetation_mask,
         "num_bands": full_data.shape[2],
@@ -199,6 +268,7 @@ def run_al_experiment(cfg: dict, strategy: str, data: dict) -> dict:
         test_labels=data["test_labels"],
         pca_rgb=data["pca_rgb"],
         vegetation_mask=data["vegetation_mask"],
+        train_pool_mask=data["train_pool_mask"],
         cfg=al_cfg,
         device=device,
         output_dir=cfg["evaluation"]["output_dir"],
