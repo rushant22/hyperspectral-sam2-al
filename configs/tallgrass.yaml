@@ -49,7 +49,7 @@ adapter:
   num_heads: 8
   ffn_dim: 512
   dropout: 0.1
-  pixel_chunk_size: 128
+  pixel_chunk_size: 64
   use_residual: true
 
 # ---- Multi-Class Segmentation Head ----
@@ -69,7 +69,7 @@ loss:
 # ---- Training ----
 training:
   epochs: 5
-  batch_size: 4
+  batch_size: 1
   learning_rate: 1.0e-4
   decoder_lr: 5.0e-5
   weight_decay: 0.01
@@ -79,7 +79,7 @@ training:
   grad_clip_norm: 1.0
   early_stopping_patience: 5
   use_amp: true
-  grad_accumulation_steps: 1
+  grad_accumulation_steps: 4
   device: "cuda"
   repeat_factor: 1
 
