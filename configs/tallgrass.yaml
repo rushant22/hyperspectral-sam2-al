@@ -102,7 +102,7 @@ active_learning:
 evaluation:
   metrics: ["miou", "per_class_iou", "overall_accuracy", "kappa"]
   save_predictions: true
-  output_dir: "./results"
+  output_dir: "./results_tallgrass/supervised"
 
 # ---- Visualization Dashboard ----
 visualization:
