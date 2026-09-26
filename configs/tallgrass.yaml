@@ -70,6 +70,7 @@ loss:
 training:
   epochs: 100
   batch_size: 1
+  use_gradient_checkpointing: true
   learning_rate: 1.0e-4
   decoder_lr: 5.0e-5
   weight_decay: 0.01

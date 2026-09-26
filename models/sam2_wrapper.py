@@ -108,6 +108,7 @@ class AdaptedSAM2(nn.Module):
         use_adapter: bool = True,
         use_pca_residual: bool = True,
         pca_model: Optional[PCA] = None,
+        use_gradient_checkpointing: bool = False,
     ):
         """
         Args:
@@ -130,6 +131,7 @@ class AdaptedSAM2(nn.Module):
         self.num_classes = num_classes
         self.use_adapter = use_adapter
         self.use_pca_residual = use_pca_residual
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.embed_dim = 256  # SAM2's image encoder output dimension
 
         # --- Default configs ---
@@ -214,7 +216,15 @@ class AdaptedSAM2(nn.Module):
                         )
 
                 self.use_sam2_backbone = True
-                print(f"[AdaptedSAM2] Successfully loaded frozen SAM2 backbone from {sam2_checkpoint} with LoRA")
+
+                if self.use_gradient_checkpointing:
+                    self._enable_hiera_gradient_checkpointing()
+
+                print(
+                    f"[AdaptedSAM2] Successfully loaded frozen SAM2 backbone "
+                    f"from {sam2_checkpoint} with LoRA"
+                )
+
             except Exception as e:
                 print(f"[AdaptedSAM2] Warning: Failed to load SAM2 ({e}). Falling back to lightweight encoder.")
                 self.feature_encoder = self._build_lightweight_encoder()
@@ -273,6 +283,66 @@ class AdaptedSAM2(nn.Module):
             ResBlock(self.embed_dim),
             ResBlock(self.embed_dim),
         )
+
+
+    def _enable_hiera_gradient_checkpointing(self):
+        """
+        Enable activation checkpointing for all SAM2 Hiera blocks.
+
+        This reduces training-time activation memory while preserving
+        gradients through the trainable LoRA modules.
+
+        The original Hiera parameters remain frozen. Only the computation
+        of each Hiera block is checkpointed and recomputed during backward.
+        """
+        if not self.use_sam2_backbone or self.sam2_encoder is None:
+            return
+
+        from types import MethodType
+
+        trunk = self.sam2_encoder.trunk
+        original_forward = trunk.forward
+
+        # Avoid wrapping the same trunk more than once.
+        if getattr(trunk, "_gradient_checkpointing_enabled", False):
+            return
+
+        def checkpointed_forward(self_trunk, x):
+            x = self_trunk.patch_embed(x)
+
+            # Add positional embedding
+            x = x + self_trunk._get_pos_embed(x.shape[1:3])
+
+            outputs = []
+
+            for i, blk in enumerate(self_trunk.blocks):
+                x = checkpoint(
+                    blk,
+                    x,
+                    use_reentrant=False,
+                )
+
+                if (i == self_trunk.stage_ends[-1]) or (
+                    i in self_trunk.stage_ends
+                    and self_trunk.return_interm_layers
+                ):
+                    feats = x.permute(0, 3, 1, 2)
+                    outputs.append(feats)
+
+            return outputs
+
+        trunk._original_forward = original_forward
+        trunk.forward = MethodType(
+            checkpointed_forward,
+            trunk,
+        )
+        trunk._gradient_checkpointing_enabled = True
+
+        print(
+            "[AdaptedSAM2] Hiera gradient checkpointing enabled "
+            f"for {len(trunk.blocks)} blocks"
+        )
+
 
     def forward(
         self,
@@ -464,5 +534,8 @@ def build_model(cfg: dict, num_bands: int, num_classes: int, pca_model=None) -> 
         use_adapter=cfg.get("adapter", {}).get("enabled", True),
         use_pca_residual=cfg.get("adapter", {}).get("use_residual", True),
         pca_model=pca_model,
+        use_gradient_checkpointing=cfg.get(
+            "training", {}
+        ).get("use_gradient_checkpointing", False),
     )
     return model
