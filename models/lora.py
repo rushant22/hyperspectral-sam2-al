@@ -119,23 +119,23 @@ class LoRALinear(nn.Module):
 
 class FusedQKVLoRA(nn.Module):
     """
-    LoRA wrapper for SAM2 Hiera's fused QKV projection.
+    LoRA for SAM2 Hiera fused QKV projections.
 
-    SAM2 uses one Linear layer that produces:
+    SAM2 Hiera uses a fused Linear layer:
 
-        [Q | K | V]
+        input_dim -> 3 * attention_dim
+
+    where attention_dim can differ from input_dim at stage
+    transitions.
+
+    Only Q and V receive LoRA updates.
+    K remains unchanged.
 
     Therefore:
 
-        Q = first 1/3 of output
-        K = middle 1/3
-        V = last 1/3
-
-    This wrapper applies LoRA only to Q and V while keeping K frozen.
-
-    W' = W0 + (alpha/rank) * DeltaW
-
-    where DeltaW is applied to the Q and V portions only.
+        Q = Q_original + Delta_Q
+        K = K_original
+        V = V_original + Delta_V
     """
 
     def __init__(
@@ -148,143 +148,161 @@ class FusedQKVLoRA(nn.Module):
         super().__init__()
 
         self.in_features = original_linear.in_features
-        self.out_features = original_linear.out_features
+        self.qkv_features = original_linear.out_features
 
-        if self.out_features != 3 * self.in_features:
+        if self.qkv_features % 3 != 0:
             raise ValueError(
-                f"FusedQKVLoRA expects out_features == "
-                f"3 * in_features, but got "
-                f"{self.in_features} -> {self.out_features}"
+                f"Fused QKV output dimension must be divisible by 3, "
+                f"but got {self.qkv_features}"
             )
 
+        # ---------------------------------------------------------
+        # Q/K/V output dimension
+        # ---------------------------------------------------------
+        self.attention_dim = self.qkv_features // 3
+
         self.rank = rank
+        self.alpha = alpha
         self.scaling = alpha / rank
 
-        # Frozen original fused QKV weight
-        self.weight = original_linear.weight
-        self.weight.requires_grad = False
+        # ---------------------------------------------------------
+        # Frozen original fused projection
+        # ---------------------------------------------------------
+        self.weight = nn.Parameter(
+            original_linear.weight.detach().clone(),
+            requires_grad=False,
+        )
 
         if original_linear.bias is not None:
-            self.bias = original_linear.bias
-            self.bias.requires_grad = False
+            self.bias = nn.Parameter(
+                original_linear.bias.detach().clone(),
+                requires_grad=False,
+            )
         else:
             self.bias = None
 
         # ---------------------------------------------------------
         # Q LoRA
+        #
+        # input_dim -> rank -> attention_dim
         # ---------------------------------------------------------
-        self.q_lora_A = nn.Parameter(
-            torch.empty(rank, self.in_features)
+        self.q_lora_A = nn.Linear(
+            self.in_features,
+            rank,
+            bias=False,
         )
 
-        self.q_lora_B = nn.Parameter(
-            torch.zeros(self.in_features, rank)
+        self.q_lora_B = nn.Linear(
+            rank,
+            self.attention_dim,
+            bias=False,
         )
 
         # ---------------------------------------------------------
         # V LoRA
+        #
+        # input_dim -> rank -> attention_dim
         # ---------------------------------------------------------
-        self.v_lora_A = nn.Parameter(
-            torch.empty(rank, self.in_features)
+        self.v_lora_A = nn.Linear(
+            self.in_features,
+            rank,
+            bias=False,
         )
 
-        self.v_lora_B = nn.Parameter(
-            torch.zeros(self.in_features, rank)
+        self.v_lora_B = nn.Linear(
+            rank,
+            self.attention_dim,
+            bias=False,
+        )
+
+        # ---------------------------------------------------------
+        # Initialization
+        #
+        # A is initialized normally.
+        # B is zero so the initial model exactly matches SAM2.
+        # ---------------------------------------------------------
+        nn.init.kaiming_uniform_(
+            self.q_lora_A.weight,
+            a=5 ** 0.5,
+        )
+
+        nn.init.zeros_(
+            self.q_lora_B.weight
         )
 
         nn.init.kaiming_uniform_(
-            self.q_lora_A,
-            a=5**0.5
+            self.v_lora_A.weight,
+            a=5 ** 0.5,
         )
 
-        nn.init.kaiming_uniform_(
-            self.v_lora_A,
-            a=5**0.5
+        nn.init.zeros_(
+            self.v_lora_B.weight
         )
 
-        self.lora_dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         """
-        Forward through frozen fused QKV projection plus
-        trainable Q/V LoRA branches.
+        x shape:
+
+            (..., input_dim)
+
+        Returns:
+
+            (..., 3 * attention_dim)
         """
 
-        # Original frozen QKV projection
-        result = F.linear(
+        # ---------------------------------------------------------
+        # Original fused QKV projection
+        # ---------------------------------------------------------
+        original = F.linear(
             x,
             self.weight,
-            self.bias
+            self.bias,
         )
 
         # Split into Q, K, V
-        q, k, v = result.chunk(3, dim=-1)
+        q_original, k_original, v_original = torch.chunk(
+            original,
+            3,
+            dim=-1,
+        )
 
-        # Apply dropout to LoRA input
-        lora_input = self.lora_dropout(x)
-
+        # ---------------------------------------------------------
         # Q LoRA
-        q_update = F.linear(
-            F.linear(
-                lora_input,
-                self.q_lora_A
-            ),
-            self.q_lora_B
+        # ---------------------------------------------------------
+        q_update = self.q_lora_B(
+            self.dropout(
+                self.q_lora_A(x)
+            )
         )
 
+        # ---------------------------------------------------------
         # V LoRA
-        v_update = F.linear(
-            F.linear(
-                lora_input,
-                self.v_lora_A
-            ),
-            self.v_lora_B
+        # ---------------------------------------------------------
+        v_update = self.v_lora_B(
+            self.dropout(
+                self.v_lora_A(x)
+            )
         )
 
-        # Apply scaling
-        q = q + self.scaling * q_update
-        v = v + self.scaling * v_update
+        # ---------------------------------------------------------
+        # Apply only Q and V updates.
+        # K remains frozen/original.
+        # ---------------------------------------------------------
+        q = q_original + self.scaling * q_update
 
+        k = k_original
+
+        v = v_original + self.scaling * v_update
+
+        # ---------------------------------------------------------
         # Reconstruct fused QKV
+        # ---------------------------------------------------------
         return torch.cat(
             [q, k, v],
-            dim=-1
+            dim=-1,
         )
-
-    def merge_lora(self) -> nn.Linear:
-        """
-        Merge Q/V LoRA updates into the original fused QKV weight.
-        """
-
-        merged = nn.Linear(
-            self.in_features,
-            self.out_features,
-            bias=self.bias is not None,
-        )
-
-        with torch.no_grad():
-
-            merged.weight.copy_(self.weight)
-
-            q_delta = (
-                self.scaling
-                * (self.q_lora_B @ self.q_lora_A)
-            )
-
-            v_delta = (
-                self.scaling
-                * (self.v_lora_B @ self.v_lora_A)
-            )
-
-            d = self.in_features
-
-            merged.weight[:d] += q_delta
-            merged.weight[2 * d:3 * d] += v_delta
-
-            if self.bias is not None:
-                merged.bias.copy_(self.bias)
-
-        return merged
 
 def inject_lora(
     model: nn.Module,
