@@ -14,7 +14,7 @@ seed: 42
 # ---- Dataset ----
 dataset:
   name: "tallgrass"
-  root_dir: "/content/drive/MyDrive/datasets/flight017_dataset"      # expects datasets/tallgrass/selected_patches/
+  root_dir: "/kaggle/input/datasets/ruxhant/tallgrass-sam2-flight017-assets/tallgrass_kaggle_assets/flight017_dataset"      # expects datasets/tallgrass/selected_patches/
   patch_size: 128                    # matches extracted patch size
   patch_overlap: 0.0                # patches are already pre-extracted, no tiling
   sam2_input_size: 128              # resize for SAM2 (same as benchmarks)
@@ -26,7 +26,7 @@ dataset:
 
 # ---- SAM2 Backbone ----
 sam2:
-  checkpoint: "./checkpoints/sam2.1_hiera_base_plus.pt"
+  checkpoint: "/kaggle/input/datasets/ruxhant/tallgrass-sam2-flight017-assets/tallgrass_kaggle_assets/checkpoints/sam2.1_hiera_base_plus.pt"
   model_cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"
   freeze_image_encoder: true
   freeze_prompt_encoder: true
