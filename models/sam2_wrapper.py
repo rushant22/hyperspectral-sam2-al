@@ -170,7 +170,15 @@ class AdaptedSAM2(nn.Module):
                     else:
                         cfg_path = f"configs/{cfg_path}"
 
-                sam2_model = build_sam2(cfg_path, sam2_checkpoint, device="cpu")
+                # SAM2 expects the Hydra config name relative to the installed
+                # `sam2` package, not an absolute YAML filesystem path.
+                sam2_cfg_name = "configs/sam2.1/sam2.1_hiera_b+"
+
+                sam2_model = build_sam2(
+                    sam2_cfg_name,
+                    sam2_checkpoint,
+                    device="cpu"
+                )
                 self.sam2_encoder = sam2_model.image_encoder
 
                 # Freeze SAM2 backbone parameters
