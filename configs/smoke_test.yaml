@@ -29,7 +29,7 @@ lora:
   enabled: true
   rank: 4                     # Smaller rank for speed
   alpha: 8
-  target_modules: ["q_proj", "v_proj"]
+  target_modules: ["qkv"]
   dropout: 0.1
   adapt_mask_decoder: false
 

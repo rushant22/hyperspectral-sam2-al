@@ -138,8 +138,10 @@ class AdaptedSAM2(nn.Module):
             "ffn_dim": 512, "dropout": 0.1,
         }
         lora_cfg = lora_cfg or {
-            "rank": 8, "alpha": 16.0, "dropout": 0.1,
-            "target_modules": ["q_proj", "v_proj"],
+            "rank": 8,
+            "alpha": 16.0,
+            "dropout": 0.1,
+            "target_modules": ["qkv"],
         }
         head_cfg = head_cfg or {"type": "conv1x1", "hidden_dim": 128}
 
@@ -177,14 +179,31 @@ class AdaptedSAM2(nn.Module):
 
                 # Inject LoRA into SAM2 encoder linear projections
                 if lora_cfg and lora_cfg.get("rank", 0) > 0:
-                    target_modules = lora_cfg.get("target_modules", ["q_proj", "v_proj", "proj", "qkv"])
-                    inject_lora(
+                    target_modules = lora_cfg.get("target_modules", ["qkv"])
+                    injected = inject_lora(
                         self.sam2_encoder,
                         target_module_names=target_modules,
                         rank=lora_cfg.get("rank", 8),
                         alpha=lora_cfg.get("alpha", 16.0),
                         dropout=lora_cfg.get("dropout", 0.1),
                     )
+
+                    print(
+                        f"[AdaptedSAM2] LoRA target modules: {target_modules}"
+                    )
+                    print(
+                        f"[AdaptedSAM2] LoRA modules injected: {len(injected)}"
+                    )
+
+                    if injected:
+                        for name in sorted(injected)[:5]:
+                            print(f"  - {name}")
+
+                    if "qkv" in target_modules and len(injected) != 24:
+                        raise RuntimeError(
+                            f"Expected 24 fused QKV LoRA modules, "
+                            f"but injected {len(injected)}"
+                        )
 
                 self.use_sam2_backbone = True
                 print(f"[AdaptedSAM2] Successfully loaded frozen SAM2 backbone from {sam2_checkpoint} with LoRA")
@@ -428,7 +447,7 @@ def build_model(cfg: dict, num_bands: int, num_classes: int, pca_model=None) -> 
             "rank": cfg.get("lora", {}).get("rank", 8),
             "alpha": cfg.get("lora", {}).get("alpha", 16.0),
             "dropout": cfg.get("lora", {}).get("dropout", 0.1),
-            "target_modules": cfg.get("lora", {}).get("target_modules", ["q_proj", "v_proj"]),
+            "target_modules": cfg.get("lora", {}).get("target_modules", ["qkv"]),
         },
         head_cfg={
             "type": cfg.get("seg_head", {}).get("type", "conv1x1"),
