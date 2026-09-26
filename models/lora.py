@@ -324,6 +324,11 @@ def inject_lora(
 
     For SAM2 Hiera, targeting "qkv" applies LoRA only to
     the Q and V portions of the fused QKV projection.
+
+    Hiera stage transitions can have different input and
+    attention dimensions, so FusedQKVLoRA handles:
+
+        input_dim -> 3 * attention_dim
     """
 
     injected_names = set()
@@ -345,10 +350,16 @@ def inject_lora(
         # ---------------------------------------------------------
         if name.endswith(".qkv"):
 
-            if module.out_features != 3 * module.in_features:
+            # Fused QKV must have three equal output chunks:
+            # Q, K and V.
+            #
+            # IMPORTANT:
+            # attention_dim may differ from input_dim at Hiera
+            # stage transitions.
+            if module.out_features % 3 != 0:
                 raise ValueError(
-                    f"Expected fused QKV layer at {name}, "
-                    f"but found "
+                    f"Expected fused QKV output dimension divisible "
+                    f"by 3 at {name}, but found "
                     f"{module.in_features} -> "
                     f"{module.out_features}"
                 )
@@ -376,7 +387,9 @@ def inject_lora(
             (name, replacement)
         )
 
+    # -------------------------------------------------------------
     # Apply replacements after traversal
+    # -------------------------------------------------------------
     for name, replacement in replacements:
 
         parts = name.split(".")
