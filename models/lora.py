@@ -20,6 +20,8 @@ Why LoRA instead of full fine-tuning:
   - SAM2 Base+ has ~80M encoder params. Fine-tuning all of them on small HSI
     datasets (Indian Pines has ~10K labeled pixels) would overfit catastrophically.
   - LoRA with r=8 adds only ~0.3M trainable params — a 250× reduction.
+    For SAM2 Hiera, ["qkv"] targets the fused QKV projection.
+    FusedQKVLoRA applies LoRA only to Q and V while keeping K frozen.
   - Memory: only LoRA params need optimizer states, saving ~4× VRAM vs. full.
 """
 
@@ -115,6 +117,174 @@ class LoRALinear(nn.Module):
             merged.bias.data = self.bias.data
         return merged
 
+class FusedQKVLoRA(nn.Module):
+    """
+    LoRA wrapper for SAM2 Hiera's fused QKV projection.
+
+    SAM2 uses one Linear layer that produces:
+
+        [Q | K | V]
+
+    Therefore:
+
+        Q = first 1/3 of output
+        K = middle 1/3
+        V = last 1/3
+
+    This wrapper applies LoRA only to Q and V while keeping K frozen.
+
+    W' = W0 + (alpha/rank) * DeltaW
+
+    where DeltaW is applied to the Q and V portions only.
+    """
+
+    def __init__(
+        self,
+        original_linear: nn.Linear,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+
+        self.in_features = original_linear.in_features
+        self.out_features = original_linear.out_features
+
+        if self.out_features != 3 * self.in_features:
+            raise ValueError(
+                f"FusedQKVLoRA expects out_features == "
+                f"3 * in_features, but got "
+                f"{self.in_features} -> {self.out_features}"
+            )
+
+        self.rank = rank
+        self.scaling = alpha / rank
+
+        # Frozen original fused QKV weight
+        self.weight = original_linear.weight
+        self.weight.requires_grad = False
+
+        if original_linear.bias is not None:
+            self.bias = original_linear.bias
+            self.bias.requires_grad = False
+        else:
+            self.bias = None
+
+        # ---------------------------------------------------------
+        # Q LoRA
+        # ---------------------------------------------------------
+        self.q_lora_A = nn.Parameter(
+            torch.empty(rank, self.in_features)
+        )
+
+        self.q_lora_B = nn.Parameter(
+            torch.zeros(self.in_features, rank)
+        )
+
+        # ---------------------------------------------------------
+        # V LoRA
+        # ---------------------------------------------------------
+        self.v_lora_A = nn.Parameter(
+            torch.empty(rank, self.in_features)
+        )
+
+        self.v_lora_B = nn.Parameter(
+            torch.zeros(self.in_features, rank)
+        )
+
+        nn.init.kaiming_uniform_(
+            self.q_lora_A,
+            a=5**0.5
+        )
+
+        nn.init.kaiming_uniform_(
+            self.v_lora_A,
+            a=5**0.5
+        )
+
+        self.lora_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward through frozen fused QKV projection plus
+        trainable Q/V LoRA branches.
+        """
+
+        # Original frozen QKV projection
+        result = F.linear(
+            x,
+            self.weight,
+            self.bias
+        )
+
+        # Split into Q, K, V
+        q, k, v = result.chunk(3, dim=-1)
+
+        # Apply dropout to LoRA input
+        lora_input = self.lora_dropout(x)
+
+        # Q LoRA
+        q_update = F.linear(
+            F.linear(
+                lora_input,
+                self.q_lora_A
+            ),
+            self.q_lora_B
+        )
+
+        # V LoRA
+        v_update = F.linear(
+            F.linear(
+                lora_input,
+                self.v_lora_A
+            ),
+            self.v_lora_B
+        )
+
+        # Apply scaling
+        q = q + self.scaling * q_update
+        v = v + self.scaling * v_update
+
+        # Reconstruct fused QKV
+        return torch.cat(
+            [q, k, v],
+            dim=-1
+        )
+
+    def merge_lora(self) -> nn.Linear:
+        """
+        Merge Q/V LoRA updates into the original fused QKV weight.
+        """
+
+        merged = nn.Linear(
+            self.in_features,
+            self.out_features,
+            bias=self.bias is not None,
+        )
+
+        with torch.no_grad():
+
+            merged.weight.copy_(self.weight)
+
+            q_delta = (
+                self.scaling
+                * (self.q_lora_B @ self.q_lora_A)
+            )
+
+            v_delta = (
+                self.scaling
+                * (self.v_lora_B @ self.v_lora_A)
+            )
+
+            d = self.in_features
+
+            merged.weight[:d] += q_delta
+            merged.weight[2 * d:3 * d] += v_delta
+
+            if self.bias is not None:
+                merged.bias.copy_(self.bias)
+
+        return merged
 
 def inject_lora(
     model: nn.Module,
@@ -124,51 +294,85 @@ def inject_lora(
     dropout: float = 0.1,
 ) -> Set[str]:
     """
-    Inject LoRA adapters into specified linear layers of a model.
+    Inject LoRA adapters into specified linear layers.
 
-    Walks the model's module tree, finds nn.Linear layers whose names
-    contain any of the target strings, and replaces them with LoRALinear.
+    Supports:
 
-    Args:
-        model: The model to inject LoRA into (e.g., SAM2's image encoder).
-        target_module_names: List of substrings to match against module names.
-            E.g., ["q_proj", "v_proj"] to target attention Q and V projections.
-        rank: LoRA rank.
-        alpha: LoRA scaling factor.
-        dropout: Dropout rate for LoRA branches.
+        q_proj / v_proj
+            -> standard LoRALinear
 
-    Returns:
-        Set of module names that were replaced with LoRA.
+        qkv
+            -> FusedQKVLoRA
 
-    Example:
-        >>> injected = inject_lora(sam2.image_encoder, ["q_proj", "v_proj"], rank=8)
-        >>> print(f"Injected LoRA into {len(injected)} layers")
+    For SAM2 Hiera, targeting "qkv" applies LoRA only to
+    the Q and V portions of the fused QKV projection.
     """
-    injected_names = set()
 
-    # We need to replace modules in-place. To do this safely, we collect
-    # all replacements first, then apply them (can't modify dict during iteration).
+    injected_names = set()
     replacements = []
 
     for name, module in model.named_modules():
-        if isinstance(module, nn.Linear):
-            # Check if this module's name matches any target pattern
-            if any(target in name for target in target_module_names):
-                replacements.append((name, module))
 
-    # Apply replacements
-    for name, original_module in replacements:
-        # Navigate to the parent module
+        if not isinstance(module, nn.Linear):
+            continue
+
+        if not any(
+            target in name
+            for target in target_module_names
+        ):
+            continue
+
+        # ---------------------------------------------------------
+        # SAM2 Hiera fused QKV
+        # ---------------------------------------------------------
+        if name.endswith(".qkv"):
+
+            if module.out_features != 3 * module.in_features:
+                raise ValueError(
+                    f"Expected fused QKV layer at {name}, "
+                    f"but found "
+                    f"{module.in_features} -> "
+                    f"{module.out_features}"
+                )
+
+            replacement = FusedQKVLoRA(
+                module,
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout,
+            )
+
+        # ---------------------------------------------------------
+        # Standard Linear layer
+        # ---------------------------------------------------------
+        else:
+
+            replacement = LoRALinear(
+                module,
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout,
+            )
+
+        replacements.append(
+            (name, replacement)
+        )
+
+    # Apply replacements after traversal
+    for name, replacement in replacements:
+
         parts = name.split(".")
         parent = model
+
         for part in parts[:-1]:
             parent = getattr(parent, part)
 
-        # Replace the linear layer with a LoRA-wrapped version
-        lora_module = LoRALinear(
-            original_module, rank=rank, alpha=alpha, dropout=dropout
+        setattr(
+            parent,
+            parts[-1],
+            replacement
         )
-        setattr(parent, parts[-1], lora_module)
+
         injected_names.add(name)
 
     return injected_names
@@ -176,30 +380,43 @@ def inject_lora(
 
 def get_lora_params(model: nn.Module) -> List[nn.Parameter]:
     """
-    Collect all LoRA parameters (A and B matrices) from a model.
+    Collect all LoRA parameters.
 
-    Used to create a separate parameter group for the optimizer, so LoRA
-    params can have a different learning rate than the mask decoder params.
+    Supports both:
+
+    - LoRALinear
+    - FusedQKVLoRA
     """
+
     lora_params = []
+
     for module in model.modules():
+
         if isinstance(module, LoRALinear):
+
             lora_params.append(module.lora_A)
             lora_params.append(module.lora_B)
+
+        elif isinstance(module, FusedQKVLoRA):
+
+            lora_params.append(module.q_lora_A)
+            lora_params.append(module.q_lora_B)
+
+            lora_params.append(module.v_lora_A)
+            lora_params.append(module.v_lora_B)
+
     return lora_params
 
 
 def count_trainable_params(model: nn.Module) -> dict:
-    """
-    Count trainable vs. frozen parameters for logging/verification.
-
-    Returns a dict with total, trainable, and frozen parameter counts.
-    Call this after freezing and LoRA injection to verify the expected
-    parameter budget.
-    """
     total = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    trainable = sum(
+        p.numel()
+        for p in model.parameters()
+        if p.requires_grad
+    )
     frozen = total - trainable
+
     return {
         "total": total,
         "trainable": trainable,
