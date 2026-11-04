@@ -1,28 +1,33 @@
 """
-active_learning/loop.py — Main active learning loop orchestration.
+active_learning/loop.py — Main active learning loop orchestration (patched).
 
-This is the top-level AL pipeline that ties together:
-  - Model training (with growing labeled set)
-  - MC-Dropout uncertainty estimation
-  - Query strategy (BALD + spatial diversity)
-  - Simulated oracle (ground truth lookup)
-  - Metric logging at each round
+Changes vs. the previous version (all aimed at round-to-round stability and
+honest accounting; splits, pools, metrics and query strategies are untouched):
 
-The loop runs for T rounds, each round:
-  1. Train/fine-tune model on current labeled set Lₜ
-  2. Run MC-Dropout inference on unlabeled set → uncertainty maps
-  3. Apply NDVI mask (vegetation-only queries)
-  4. Select K pixels using the chosen strategy
-  5. "Label" them via simulated oracle → Lₜ₊₁
-  6. Log metrics (mIoU, annotation count, etc.)
+  1. BatchNorm recalibration after every training round. With batch size 1 and
+     a random patch order, BN running stats used to depend on whichever ~10
+     patches came last. We now recompute them over ALL train-pool patches
+     (unlabeled HSI only, no labels, no test patches).
+  2. Best-weights restore. Training-loss early stopping used to keep the LAST
+     epoch's weights; we now restore the weights from the best-loss epoch.
+  3. Lower, configurable AL learning rate (`retrain_lr`, default 3e-5) since a
+     fresh AdamW with lr 1e-4 and no warmup kicked a converged model each round.
+  4. Class weights computed from the CURRENTLY LABELED pixels only (the labels
+     the oracle has already revealed) and passed to the focal loss, matching
+     what supervised training does.
+  5. Correct accounting. Flow is now:
+         train on L0 -> evaluate ("initial", a real trained model)
+         each round: query with model trained on L_{t-1} -> label -> train on
+         L_t -> evaluate. The logged labeled_count is exactly what the
+         evaluated model was trained on, and the last round's labels are used.
 """
 
 import os
 import json
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 import numpy as np
 from typing import Dict, Optional
 from tqdm import tqdm
@@ -35,14 +40,12 @@ from active_learning.query_strategies import (
 )
 from active_learning.simulated_oracle import SimulatedOracle
 from evaluation.metrics import compute_miou, compute_per_class_iou
+from models.losses import FocalDiceLoss
 
 
 class ActiveLearningLoop:
     """
     Orchestrates the full active learning experiment.
-
-    Designed to be run as a complete experiment — outputs all metrics
-    needed for the annotation-efficiency curves in the paper.
     """
 
     def __init__(
@@ -58,18 +61,6 @@ class ActiveLearningLoop:
         device: str = "cuda",
         output_dir: str = "./results",
     ):
-        """
-        Args:
-            model: The segmentation model (AdaptedSAM2 instance).
-            full_data: Full HSI image, shape (B, H, W).
-            full_labels: Full ground truth, shape (H, W).
-            test_labels: Test split labels, shape (H, W), -1 for non-test pixels.
-            pca_rgb: PCA-reduced 3-channel image, shape (3, H, W).
-            vegetation_mask: (H, W) boolean — True = vegetation pixel.
-            cfg: Config dict (active_learning section).
-            device: Training device.
-            output_dir: Directory to save results.
-        """
         self.model = model
         self.full_data = full_data
         self.full_labels = full_labels
@@ -79,10 +70,8 @@ class ActiveLearningLoop:
         self.train_pool_mask = train_pool_mask.bool()
         self.device = device
         self.output_dir = output_dir
+
         # Tallgrass AL composite is a horizontal strip of 128x128 patches.
-        # Store patch width/height so model inference can be performed
-        # patch-by-patch instead of sending the entire 128x6400 strip
-        # through SAM2 at once.
         self.patch_h = self.full_data.shape[1]
         self.patch_w = 128
 
@@ -98,9 +87,7 @@ class ActiveLearningLoop:
                 f"is not divisible by patch width {self.patch_w}."
             )
 
-        self.num_patches = (
-            self.full_data.shape[2] // self.patch_w
-        )
+        self.num_patches = self.full_data.shape[2] // self.patch_w
 
         if self.train_pool_mask.shape != self.full_labels.shape:
             raise ValueError(
@@ -121,9 +108,12 @@ class ActiveLearningLoop:
 
         # Training parameters
         train_cfg = cfg.get("training", {})
-        self.lr = train_cfg.get("learning_rate", 1e-4)
+        base_lr = train_cfg.get("learning_rate", 1e-4)
+        # AL fine-tunes an already-trained model every round, so use a gentler LR.
+        self.lr = al_cfg.get("retrain_lr", base_lr * 0.3)
         self.weight_decay = train_cfg.get("weight_decay", 0.01)
         self.use_amp = train_cfg.get("use_amp", True) and str(device) == "cuda"
+        self.train_patience = al_cfg.get("retrain_patience", 10)
 
         # Simulated oracle
         self.oracle = SimulatedOracle(full_labels)
@@ -134,24 +124,13 @@ class ActiveLearningLoop:
             "strategy": self.strategy,
         }
 
-        # Compute the query budget ONLY from the eligible geographic
-        # training pool.
-        #
-        # Valid labels:
-        #   0  = Background
-        #   1  = Sericea
-        #  -1  = Ignore
-        #
-        # Background is a valid segmentation class, so it must remain
-        # eligible for active learning.
+        # Query budget computed ONLY from the eligible geographic train pool.
+        # Background (0) is a valid class; -1 is ignore.
         eligible_train_pixels = (
-            self.train_pool_mask
-            & (self.full_labels >= 0)
+            self.train_pool_mask & (self.full_labels >= 0)
         )
 
-        n_train_pool = int(
-            eligible_train_pixels.sum().item()
-        )
+        n_train_pool = int(eligible_train_pixels.sum().item())
 
         if n_train_pool == 0:
             raise RuntimeError(
@@ -159,74 +138,46 @@ class ActiveLearningLoop:
             )
 
         self.n_train_pool = n_train_pool
-
-        self.query_budget = max(
-            10,
-            int(n_train_pool * self.query_fraction),
-        )
+        self.query_budget = max(10, int(n_train_pool * self.query_fraction))
 
         os.makedirs(output_dir, exist_ok=True)
 
-    def run(self) -> Dict:
-        """
-        Execute the full active learning loop.
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
 
-        Returns:
-            Dict with results for all rounds (for plotting).
-        """
+    def run(self) -> Dict:
         print(f"\n{'='*60}")
         print(f"Active Learning Loop — Strategy: {self.strategy}")
         print(f"Rounds: {self.num_rounds}, Budget/round: {self.query_budget} pixels")
+        print(f"AL learning rate: {self.lr:.2e}")
         print(f"{'='*60}\n")
 
-        # --- Move model to device before any forward passes ---
         self.model.to(self.device)
 
-        # --- Initialize labeled pool ---
-        # Initial labels are sampled ONLY from the geographic training pool.
-        # Validation and test pixels can never enter the labeled pool.
+        # --- Initialize labeled pool (geographic train pool only) ---
         eligible_train_pixels = (
-            self.train_pool_mask
-            & (self.full_labels >= 0)
+            self.train_pool_mask & (self.full_labels >= 0)
         )
+        eligible_indices = torch.nonzero(eligible_train_pixels, as_tuple=False)
 
-        eligible_indices = torch.nonzero(
-            eligible_train_pixels,
-            as_tuple=False,
-        )
-
-        n_initial = max(
-            1,
-            int(len(eligible_indices) * self.initial_fraction),
-        )
+        n_initial = max(1, int(len(eligible_indices) * self.initial_fraction))
 
         generator = torch.Generator().manual_seed(42)
-
         permutation = torch.randperm(
-            len(eligible_indices),
-            generator=generator,
+            len(eligible_indices), generator=generator
         )[:n_initial]
-
         selected = eligible_indices[permutation]
 
-        labeled_mask = torch.zeros_like(
-            self.full_labels,
-            dtype=torch.bool,
-        )
+        labeled_mask = torch.zeros_like(self.full_labels, dtype=torch.bool)
+        labeled_mask[selected[:, 0], selected[:, 1]] = True
 
-        labeled_mask[
-            selected[:, 0],
-            selected[:, 1],
-        ] = True
-
-        # Keep the simulated oracle synchronized with our
-        # geographically restricted labeled pool.
         self.oracle.labeled_mask = labeled_mask.clone()
-        self.oracle.total_labeled = int(
-            labeled_mask.sum().item()
-        )
+        self.oracle.total_labeled = int(labeled_mask.sum().item())
 
-        # --- Evaluate initial model (before any AL) ---
+        # --- Train on L0, then evaluate (a real "initial" point) ---
+        training_labels, _ = self.oracle.get_labeled_data()
+        self._train_round(training_labels, round_idx=0)
         initial_metrics = self._evaluate_on_test()
         self.results["initial"] = {
             "labeled_count": self.oracle.total_labeled,
@@ -240,22 +191,19 @@ class ActiveLearningLoop:
         for round_idx in range(1, self.num_rounds + 1):
             print(f"\n--- AL Round {round_idx}/{self.num_rounds} ---")
 
-            # Step 1: Train on current labeled set
-            training_labels, current_mask = self.oracle.get_labeled_data()
-            self._train_round(training_labels, round_idx)
-
-            # Step 2: MC-Dropout uncertainty estimation
+            # Step 1: uncertainty from the model trained on L_{t-1}
+            current_mask = self.oracle.labeled_mask.clone()
             uncertainty = self._compute_uncertainty()
 
-            # Step 3: Select query pixels
+            # Step 2: select queries
             query_coords = self._select_queries(
                 uncertainty, current_mask, round_idx
             )
 
-            # Step 4: "Label" via oracle
+            # Step 3: "label" via oracle
             oracle_result = self.oracle.label_pixels(query_coords)
 
-            # Emergency fallback: ensure AL never gets 0 new labels if unlabeled pixels remain
+            # Emergency fallback: never end a round with 0 new labels
             if oracle_result["num_new"] == 0:
                 valid_pool_mask = (
                     self.train_pool_mask
@@ -272,29 +220,39 @@ class ActiveLearningLoop:
                     for idx in range(len(extra)):
                         er, ec = extra[idx, 0].item(), extra[idx, 1].item()
                         self.oracle.labeled_mask[er, ec] = True
-                    self.oracle.total_labeled = self.oracle.labeled_mask.sum().item()
+                    self.oracle.total_labeled = int(
+                        self.oracle.labeled_mask.sum().item()
+                    )
                     oracle_result["num_new"] += n_emerg
-                    query_coords = torch.cat([query_coords, extra], dim=0) if len(query_coords) > 0 else extra
+                    query_coords = (
+                        torch.cat([query_coords, extra], dim=0)
+                        if len(query_coords) > 0 else extra
+                    )
                     print(
                         f"  [AL] Emergency top-up: added "
                         f"{n_emerg} valid training-pool pixels."
                     )
 
-            # Step 5: Evaluate on test set
+            # Step 4: train on L_t (includes the pixels just labeled)
+            training_labels, _ = self.oracle.get_labeled_data()
+            self._train_round(training_labels, round_idx)
+
+            # Step 5: evaluate the model that was trained on L_t
             metrics = self._evaluate_on_test()
 
-            # Step 6: Save per-round checkpoint (so training can resume)
+            # Step 6: per-round checkpoint
             ckpt_path = os.path.join(
                 self.output_dir,
                 f"al_{self.strategy}_round{round_idx:02d}.pt"
             )
             torch.save(
                 {"model_state_dict": self.model.state_dict(),
-                 "round": round_idx, "labeled_count": self.oracle.total_labeled},
+                 "round": round_idx,
+                 "labeled_count": self.oracle.total_labeled},
                 ckpt_path,
             )
 
-            # Step 7: Log results (including query coordinates for dashboard)
+            # Step 7: log
             coords_list = query_coords.tolist() if len(query_coords) > 0 else []
             round_result = {
                 "round": round_idx,
@@ -304,104 +262,139 @@ class ActiveLearningLoop:
                 "per_class_iou": metrics["per_class_iou"],
                 "mean_entropy": float(uncertainty["entropy"].mean()),
                 "mean_bald": float(uncertainty["bald"].mean()),
-                "query_coords": coords_list,          # for dashboard
+                "query_coords": coords_list,
             }
             self.results["rounds"].append(round_result)
-            # Save results after every completed round
             self._save_results()
 
             print(f"[Round {round_idx}] mIoU: {metrics['miou']:.4f}, "
                   f"labeled: {self.oracle.total_labeled}")
 
-        # --- Save results ---
         self._save_results()
-
         return self.results
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _patch_inputs(self, patch_idx: int):
+        """Return (hsi, pca) CPU tensors with batch dim for one patch."""
+        cs = patch_idx * self.patch_w
+        ce = cs + self.patch_w
+        hsi = self.full_data[:, :, cs:ce].unsqueeze(0)
+        pca = (
+            self.pca_rgb[:, :, cs:ce].unsqueeze(0)
+            if self.pca_rgb is not None else None
+        )
+        return hsi, pca
+
+    def _labeled_class_weights(self, training_labels: torch.Tensor):
+        """
+        Inverse-frequency class weights from the currently labeled pixels only.
+        Normalized to mean 1. Returns None if a class is entirely absent.
+        """
+        num_classes = self.model.num_classes
+        valid = training_labels[training_labels >= 0]
+        if valid.numel() == 0:
+            return None
+        counts = torch.bincount(valid, minlength=num_classes).float()
+        if (counts == 0).any():
+            return None
+        weights = 1.0 / counts
+        weights = weights / weights.mean()
+        return weights
+
+    @torch.no_grad()
+    def _recalibrate_bn(self):
+        """
+        Recompute BatchNorm running statistics as a cumulative average over
+        ALL train-pool patches (unlabeled HSI only; no labels, no test data).
+        """
+        bns = [
+            m for m in self.model.modules()
+            if isinstance(m, nn.modules.batchnorm._BatchNorm)
+        ]
+        if not bns:
+            return
+
+        for m in bns:
+            m.reset_running_stats()
+            m.momentum = None  # cumulative moving average
+
+        self.model.train()
+        used = 0
+        for patch_idx in range(self.num_patches):
+            cs = patch_idx * self.patch_w
+            ce = cs + self.patch_w
+            if not self.train_pool_mask[:, cs:ce].any():
+                continue
+            hsi, pca = self._patch_inputs(patch_idx)
+            hsi = hsi.to(self.device)
+            pca = pca.to(self.device) if pca is not None else None
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                self.model(hsi, pca)
+            used += 1
+
+        for m in bns:
+            m.momentum = 0.1
+
+        self.model.eval()
+        print(f"  [BN] Recalibrated {len(bns)} BatchNorm layers "
+              f"over {used} train-pool patches.")
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
 
     def _train_round(self, training_labels: torch.Tensor, round_idx: int):
         """
-        Train the model on the current labeled set for one AL round.
-
-        The AL composite is a horizontal strip of 128x128 patches.
-        Training is therefore performed patch-by-patch so that SAM2
-        always receives the same spatial input size used during
-        supervised training.
+        Train on the current labeled set (patch-by-patch), restore the
+        best-loss weights, then recalibrate BatchNorm statistics.
         """
-        from models.losses import FocalDiceLoss
-
         self.model.train()
         self.model.to(self.device)
 
-        loss_fn = FocalDiceLoss(ignore_index=-1)
+        class_weights = self._labeled_class_weights(training_labels)
+        loss_fn = FocalDiceLoss(
+            focal_alpha=class_weights,
+            ignore_index=-1,
+        )
 
+        params = [p for p in self.model.parameters() if p.requires_grad]
         optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, self.model.parameters()),
-            lr=self.lr,
-            weight_decay=self.weight_decay,
+            params, lr=self.lr, weight_decay=self.weight_decay,
         )
-
-        scaler = torch.amp.GradScaler(
-            'cuda',
-            enabled=self.use_amp,
-        )
+        scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
 
         best_loss = float("inf")
+        best_state = None
         patience_counter = 0
-        patience = 10
-
-        # Number of patches in the horizontal composite.
-        num_patches = self.full_data.shape[2] // self.patch_w
+        epoch = -1
+        epoch_loss = float("nan")
 
         for epoch in range(self.retrain_epochs):
+            self.model.train()
             epoch_loss = 0.0
             n_used = 0
 
-            # Shuffle patch order so training does not always see
-            # patches in exactly the same sequence.
-            patch_order = torch.randperm(num_patches)
+            patch_order = torch.randperm(self.num_patches)
 
             for patch_idx in patch_order.tolist():
+                cs = patch_idx * self.patch_w
+                ce = cs + self.patch_w
 
-                col_start = patch_idx * self.patch_w
-                col_end = col_start + self.patch_w
-
-                # HSI patch: (B, 128, 128)
-                hsi_patch = self.full_data[
-                    :,
-                    :,
-                    col_start:col_end,
-                ]
-
-                # Label patch: (128, 128)
-                label_patch = training_labels[
-                    :,
-                    col_start:col_end,
-                ]
-
-                # Skip patches that contain no currently labeled pixels.
+                label_patch = training_labels[:, cs:ce]
                 if not torch.any(label_patch >= 0):
                     continue
 
-                hsi = hsi_patch.unsqueeze(0).to(self.device)
+                hsi, pca = self._patch_inputs(patch_idx)
+                hsi = hsi.to(self.device)
+                pca = pca.to(self.device) if pca is not None else None
                 labels = label_patch.unsqueeze(0).to(self.device)
-
-                pca = None
-
-                if self.pca_rgb is not None:
-                    pca_patch = self.pca_rgb[
-                        :,
-                        :,
-                        col_start:col_end,
-                    ]
-
-                    pca = pca_patch.unsqueeze(0).to(self.device)
 
                 optimizer.zero_grad()
 
-                with torch.amp.autocast(
-                    'cuda',
-                    enabled=self.use_amp,
-                ):
+                with torch.amp.autocast('cuda', enabled=self.use_amp):
                     output = self.model(hsi, pca)
                     logits = output["logits"]
 
@@ -413,22 +406,11 @@ class ActiveLearningLoop:
                             align_corners=False,
                         )
 
-                    loss_dict = loss_fn(
-                        logits,
-                        labels,
-                    )
-
-                    loss = loss_dict["total"]
+                    loss = loss_fn(logits, labels)["total"]
 
                 scaler.scale(loss).backward()
-
                 scaler.unscale_(optimizer)
-
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    max_norm=1.0,
-                )
-
+                torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
 
@@ -444,73 +426,55 @@ class ActiveLearningLoop:
 
             epoch_loss /= n_used
 
-            # Simple early stopping.
             if epoch_loss < best_loss - 1e-4:
                 best_loss = epoch_loss
                 patience_counter = 0
+                best_state = {
+                    n: p.detach().cpu().clone()
+                    for n, p in self.model.named_parameters()
+                    if p.requires_grad
+                }
             else:
                 patience_counter += 1
-
-                if patience_counter >= patience:
+                if patience_counter >= self.train_patience:
                     break
 
+        # Restore best-loss weights (not just the last epoch's).
+        if best_state is not None:
+            with torch.no_grad():
+                for n, p in self.model.named_parameters():
+                    if n in best_state:
+                        p.copy_(best_state[n].to(p.device))
+
         print(
-            f"  Trained for {epoch+1} epochs, "
-            f"final loss: {epoch_loss:.4f}"
+            f"  Trained {epoch+1} epochs, best loss: {best_loss:.4f} "
+            f"(last: {epoch_loss:.4f}), lr={self.lr:.1e}, "
+            f"class_weights="
+            f"{None if class_weights is None else [round(w, 3) for w in class_weights.tolist()]}"
         )
 
+        # BN stats must match the weights we are keeping.
+        self._recalibrate_bn()
+
+    # ------------------------------------------------------------------
+    # Uncertainty
+    # ------------------------------------------------------------------
+
     def _compute_uncertainty(self) -> Dict[str, torch.Tensor]:
-        """
-        Compute MC-Dropout uncertainty patch-by-patch.
-
-        Each 128x128 patch is passed independently through SAM2.
-        The resulting uncertainty maps are then reconstructed into
-        the horizontal AL composite coordinate system.
-        """
-
-        num_classes = self.model.num_classes
+        """MC-Dropout uncertainty, patch-by-patch, reassembled into the strip."""
         height = self.full_data.shape[1]
         total_width = self.full_data.shape[2]
 
-        entropy_map = torch.zeros(
-            height,
-            total_width,
-            dtype=torch.float32,
-        )
-
-        bald_map = torch.zeros(
-            height,
-            total_width,
-            dtype=torch.float32,
-        )
-
-        num_patches = total_width // self.patch_w
+        entropy_map = torch.zeros(height, total_width, dtype=torch.float32)
+        bald_map = torch.zeros(height, total_width, dtype=torch.float32)
 
         for patch_idx in tqdm(
-            range(num_patches),
-            desc="MC-Dropout uncertainty",
+            range(self.num_patches), desc="MC-Dropout uncertainty"
         ):
-            col_start = patch_idx * self.patch_w
-            col_end = col_start + self.patch_w
+            cs = patch_idx * self.patch_w
+            ce = cs + self.patch_w
 
-            hsi_patch = self.full_data[
-                :,
-                :,
-                col_start:col_end,
-            ]
-
-            hsi = hsi_patch.unsqueeze(0)
-
-            pca = None
-
-            if self.pca_rgb is not None:
-                pca_patch = self.pca_rgb[
-                    :,
-                    :,
-                    col_start:col_end,
-                ]
-
-                pca = pca_patch.unsqueeze(0)
+            hsi, pca = self._patch_inputs(patch_idx)
 
             uncertainty = mc_dropout_inference(
                 self.model,
@@ -520,20 +484,16 @@ class ActiveLearningLoop:
                 device=self.device,
             )
 
-            entropy_map[
-                :,
-                col_start:col_end,
-            ] = uncertainty["entropy"].squeeze(0).cpu()
+            entropy_map[:, cs:ce] = uncertainty["entropy"].squeeze(0).cpu() \
+                if uncertainty["entropy"].dim() == 3 else uncertainty["entropy"].cpu()
+            bald_map[:, cs:ce] = uncertainty["bald"].squeeze(0).cpu() \
+                if uncertainty["bald"].dim() == 3 else uncertainty["bald"].cpu()
 
-            bald_map[
-                :,
-                col_start:col_end,
-            ] = uncertainty["bald"].squeeze(0).cpu()
+        return {"entropy": entropy_map, "bald": bald_map}
 
-        return {
-            "entropy": entropy_map,
-            "bald": bald_map,
-        }
+    # ------------------------------------------------------------------
+    # Query selection (logic unchanged)
+    # ------------------------------------------------------------------
 
     def _select_queries(
         self,
@@ -541,35 +501,17 @@ class ActiveLearningLoop:
         labeled_mask: torch.Tensor,
         round_idx: int,
     ) -> torch.Tensor:
-        """
-        Select pixels to query based on the configured strategy.
-
-        Vegetation-mask fallback: if the NDVI mask leaves fewer than
-        `query_budget` candidates, we fall back to all unlabeled pixels
-        so the AL loop never stalls at 0 new labels.
-        """
-
-        # Candidate pixels must ALWAYS come from the geographic
-        # training pool. Validation and test pixels are never queried.
         train_unlabeled_mask = (
             self.train_pool_mask
             & (self.full_labels >= 0)
             & (~labeled_mask)
         )
 
-        # Start with the geographic training pool.
         veg = train_unlabeled_mask.clone()
 
-        # If a vegetation mask exists, restrict candidates further.
         if self.vegetation_mask is not None:
-            veg = (
-                train_unlabeled_mask
-                & self.vegetation_mask.bool()
-            )
-
-            n_veg_unlabeled = int(
-                veg.sum().item()
-            )
+            veg = train_unlabeled_mask & self.vegetation_mask.bool()
+            n_veg_unlabeled = int(veg.sum().item())
 
             if n_veg_unlabeled < self.query_budget:
                 print(
@@ -578,8 +520,6 @@ class ActiveLearningLoop:
                     f"(budget={self.query_budget}). "
                     f"Falling back to all eligible training-pool pixels."
                 )
-
-                # Fall back ONLY to the geographic training pool.
                 veg = train_unlabeled_mask
 
         if self.strategy == "random":
@@ -591,9 +531,8 @@ class ActiveLearningLoop:
                 seed=42 + round_idx,
             )
         elif self.strategy == "entropy":
-            scores = uncertainty["entropy"]
             query_coords = uncertainty_query(
-                uncertainty_scores=scores,
+                uncertainty_scores=uncertainty["entropy"],
                 num_pixels=self.query_budget,
                 labeled_mask=labeled_mask,
                 vegetation_mask=veg,
@@ -601,14 +540,7 @@ class ActiveLearningLoop:
         elif self.strategy in ("bald", "badge_inspired"):
             scores = uncertainty["bald"]
             if self.strategy == "badge_inspired" and self.use_diversity:
-                # Need features for clustering — re-run a single forward pass
-                self.model.eval()
-                with torch.no_grad():
-                    hsi = self.full_data.unsqueeze(0).to(self.device)
-                    pca = self.pca_rgb.unsqueeze(0).to(self.device) if self.pca_rgb is not None else None
-                    output = self.model(hsi, pca)
-                    features = output["features"].squeeze(0).cpu()  # (D, H, W)
-
+                features = self._compute_feature_strip()
                 query_coords = badge_inspired_query(
                     uncertainty_scores=scores,
                     features=features,
@@ -627,148 +559,97 @@ class ActiveLearningLoop:
         else:
             raise ValueError(f"Unknown strategy: {self.strategy}")
 
-        # --- Minimum Budget Guarantee ---
-        # Ensure AL never starves for new labels in late rounds when uncertainty
-        # picks land on background or already-dense areas.
+        # --- Minimum budget guarantee ---
         min_budget = max(10, self.query_budget // 5)
         gt = self.oracle.ground_truth
 
         if len(query_coords) > 0:
             r = query_coords[:, 0]
             c = query_coords[:, 1]
-
             valid_new = (
                 self.train_pool_mask[r, c]
                 & (gt[r, c] >= 0)
                 & (~labeled_mask[r, c])
             )
-
-            n_valid = int(
-                valid_new.sum().item()
-            )
+            n_valid = int(valid_new.sum().item())
         else:
             n_valid = 0
 
         if n_valid < min_budget:
             shortfall = min_budget - n_valid
 
-            # Top-up candidates must remain inside the geographic
-            # training pool and must have valid labels.
             valid_pool_mask = (
-                self.train_pool_mask
-                & (gt >= 0)
-                & (~labeled_mask)
+                self.train_pool_mask & (gt >= 0) & (~labeled_mask)
             )
 
             if len(query_coords) > 0:
-                valid_pool_mask[
-                    query_coords[:, 0],
-                    query_coords[:, 1],
-                ] = False
+                valid_pool_mask[query_coords[:, 0], query_coords[:, 1]] = False
 
-            pool_coords = torch.nonzero(
-                valid_pool_mask
-            )
+            pool_coords = torch.nonzero(valid_pool_mask)
 
             if len(pool_coords) > 0:
-                n_sample = min(
-                    shortfall,
-                    len(pool_coords),
-                )
-
-                g = torch.Generator().manual_seed(
-                    42 + round_idx * 1000
-                )
-
-                perm = torch.randperm(
-                    len(pool_coords),
-                    generator=g,
-                )[:n_sample]
-
+                n_sample = min(shortfall, len(pool_coords))
+                g = torch.Generator().manual_seed(42 + round_idx * 1000)
+                perm = torch.randperm(len(pool_coords), generator=g)[:n_sample]
                 extra_coords = pool_coords[perm]
 
                 query_coords = (
-                    torch.cat(
-                        [query_coords, extra_coords],
-                        dim=0,
-                    )
-                    if len(query_coords) > 0
-                    else extra_coords
+                    torch.cat([query_coords, extra_coords], dim=0)
+                    if len(query_coords) > 0 else extra_coords
                 )
 
                 print(
                     f"  [AL] Top-up guarantee: added "
                     f"{n_sample} random training-pool pixels "
-                    f"(projected new: "
-                    f"{n_valid + n_sample}, "
+                    f"(projected new: {n_valid + n_sample}, "
                     f"min_budget={min_budget})"
                 )
-            
 
         return query_coords
 
+    @torch.no_grad()
+    def _compute_feature_strip(self) -> torch.Tensor:
+        """
+        Patch-by-patch feature extraction for badge_inspired (the old code
+        pushed the whole 128x6400 strip through SAM2 at once).
+        Returns (D, H, W_total) on CPU.
+        """
+        self.model.eval()
+        feats = []
+        for patch_idx in range(self.num_patches):
+            hsi, pca = self._patch_inputs(patch_idx)
+            hsi = hsi.to(self.device)
+            pca = pca.to(self.device) if pca is not None else None
+            out = self.model(hsi, pca)
+            feats.append(out["features"].squeeze(0).cpu())
+        return torch.cat(feats, dim=2)
+
+    # ------------------------------------------------------------------
+    # Evaluation (logic unchanged)
+    # ------------------------------------------------------------------
+
     def _evaluate_on_test(self) -> Dict:
-        """
-        Evaluate the model patch-by-patch on the geographic test patches.
-
-        The predictions are reconstructed into the same horizontal
-        composite coordinate system used by test_labels.
-        """
-
         self.model.eval()
 
         height = self.full_data.shape[1]
         total_width = self.full_data.shape[2]
 
-        pred = torch.zeros(
-            height,
-            total_width,
-            dtype=torch.long,
-        )
-
-        num_patches = total_width // self.patch_w
+        pred = torch.zeros(height, total_width, dtype=torch.long)
 
         with torch.no_grad():
+            for patch_idx in range(self.num_patches):
+                cs = patch_idx * self.patch_w
+                ce = cs + self.patch_w
 
-            for patch_idx in range(num_patches):
-
-                col_start = patch_idx * self.patch_w
-                col_end = col_start + self.patch_w
-
-                # Skip patches that contain no test pixels.
-                test_patch = self.test_labels[
-                    :,
-                    col_start:col_end,
-                ]
-
+                test_patch = self.test_labels[:, cs:ce]
                 if not torch.any(test_patch >= 0):
                     continue
 
-                hsi_patch = self.full_data[
-                    :,
-                    :,
-                    col_start:col_end,
-                ]
+                hsi, pca = self._patch_inputs(patch_idx)
+                hsi = hsi.to(self.device)
+                pca = pca.to(self.device) if pca is not None else None
 
-                hsi = hsi_patch.unsqueeze(0).to(self.device)
-
-                pca = None
-
-                if self.pca_rgb is not None:
-                    pca_patch = self.pca_rgb[
-                        :,
-                        :,
-                        col_start:col_end,
-                    ]
-
-                    pca = pca_patch.unsqueeze(0).to(self.device)
-
-                output = self.model(
-                    hsi,
-                    pca,
-                )
-
-                logits = output["logits"]
+                logits = self.model(hsi, pca)["logits"]
 
                 if logits.shape[2:] != test_patch.shape:
                     logits = nn.functional.interpolate(
@@ -778,57 +659,28 @@ class ActiveLearningLoop:
                         align_corners=False,
                     )
 
-                patch_pred = (
-                    logits
-                    .squeeze(0)
-                    .argmax(dim=0)
-                    .cpu()
-                )
+                pred[:, cs:ce] = logits.squeeze(0).argmax(dim=0).cpu()
 
-                pred[
-                    :,
-                    col_start:col_end,
-                ] = patch_pred
-
-        # Evaluate ONLY geographic test pixels.
         valid = self.test_labels >= 0
 
         if valid.sum() == 0:
-            return {
-                "miou": 0.0,
-                "per_class_iou": {},
-            }
+            return {"miou": 0.0, "per_class_iou": {}}
 
         pred_valid = pred[valid]
         gt_valid = self.test_labels[valid]
 
-        miou = compute_miou(
-            pred_valid,
-            gt_valid,
-            self.model.num_classes,
-        )
-
+        miou = compute_miou(pred_valid, gt_valid, self.model.num_classes)
         per_class = compute_per_class_iou(
-            pred_valid,
-            gt_valid,
-            self.model.num_classes,
+            pred_valid, gt_valid, self.model.num_classes
         )
 
-        return {
-            "miou": miou,
-            "per_class_iou": per_class,
-        }
+        return {"miou": miou, "per_class_iou": per_class}
 
     def _save_results(self):
-        """Save AL results to JSON for later plotting."""
         output_path = os.path.join(
             self.output_dir, f"al_results_{self.strategy}.json"
         )
-
-        # Convert tensors/numpy to Python types for JSON serialization
         serializable = json.loads(json.dumps(self.results, default=str))
-
         with open(output_path, "w") as f:
             json.dump(serializable, f, indent=2)
-
         print(f"\n[AL Loop] Results saved to {output_path}")

@@ -108,6 +108,7 @@ def prepare_data(cfg: dict):
 
     # --- PCA for residual pathway ---
     pca_data, pca_model = apply_pca(full_data_norm, n_components=3)
+    
 
     # --- NDVI vegetation mask ---
     red_idx, nir_idx = get_ndvi_band_indices(dataset_name)

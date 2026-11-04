@@ -28,7 +28,10 @@ from sklearn.decomposition import PCA
 import numpy as np
 
 from models.spectral_adapter import SpectralCrossAttentionAdapter
-from models.lora import inject_lora, get_lora_params, count_trainable_params
+from models.lora import (
+    inject_lora, get_lora_params, count_trainable_params,
+    FusedQKVLoRA, LoRALinear,
+)
 
 
 class MultiClassHead(nn.Module):
@@ -481,9 +484,11 @@ class AdaptedSAM2(nn.Module):
                         module.train()
 
         if self.sam2_encoder is not None:
-            for name, module in self.sam2_encoder.named_modules():
-                if "lora" in name.lower() and isinstance(module, nn.Dropout):
-                    module.train()
+            for m in self.sam2_encoder.modules():
+                if isinstance(m, FusedQKVLoRA):
+                    m.dropout.train()
+                elif isinstance(m, LoRALinear):
+                    m.lora_dropout.train()
 
     def get_adapter_attention_maps(self, hsi: torch.Tensor) -> torch.Tensor:
         """
