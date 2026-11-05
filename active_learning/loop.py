@@ -114,6 +114,11 @@ class ActiveLearningLoop:
         self.weight_decay = train_cfg.get("weight_decay", 0.01)
         self.use_amp = train_cfg.get("use_amp", True) and str(device) == "cuda"
         self.train_patience = al_cfg.get("retrain_patience", 10)
+        # None = old behaviour (early-stop on train loss, restore best-loss weights).
+        # An int (e.g. 20) = fixed epoch count + average weights over the last few epochs.
+        self.fixed_epochs = al_cfg.get("fixed_epochs", None)
+        self.avg_last_epochs = al_cfg.get("avg_last_epochs", 5)
+        self.init_seed = al_cfg.get("init_seed", 42)
 
         # Simulated oracle
         self.oracle = SimulatedOracle(full_labels)
@@ -163,7 +168,7 @@ class ActiveLearningLoop:
 
         n_initial = max(1, int(len(eligible_indices) * self.initial_fraction))
 
-        generator = torch.Generator().manual_seed(42)
+        generator = torch.Generator().manual_seed(self.init_seed)
         permutation = torch.randperm(
             len(eligible_indices), generator=generator
         )[:n_initial]
@@ -348,17 +353,18 @@ class ActiveLearningLoop:
 
     def _train_round(self, training_labels: torch.Tensor, round_idx: int):
         """
-        Train on the current labeled set (patch-by-patch), restore the
-        best-loss weights, then recalibrate BatchNorm statistics.
+        Train on the current labeled set (patch-by-patch).
+
+        Mode A (fixed_epochs set): train exactly `fixed_epochs` epochs and use the
+        average of the weights over the last `avg_last_epochs` epochs.
+        Mode B (default): early-stop on train loss and restore best-loss weights.
+        BatchNorm statistics are recalibrated afterwards in both modes.
         """
         self.model.train()
         self.model.to(self.device)
 
         class_weights = self._labeled_class_weights(training_labels)
-        loss_fn = FocalDiceLoss(
-            focal_alpha=class_weights,
-            ignore_index=-1,
-        )
+        loss_fn = FocalDiceLoss(focal_alpha=class_weights, ignore_index=-1)
 
         params = [p for p in self.model.parameters() if p.requires_grad]
         optimizer = optim.AdamW(
@@ -366,13 +372,19 @@ class ActiveLearningLoop:
         )
         scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
 
+        fixed = self.fixed_epochs is not None
+        n_epochs = self.fixed_epochs if fixed else self.retrain_epochs
+        avg_start = max(0, n_epochs - self.avg_last_epochs)
+
         best_loss = float("inf")
         best_state = None
         patience_counter = 0
+        avg_state = None
+        n_avg = 0
         epoch = -1
         epoch_loss = float("nan")
 
-        for epoch in range(self.retrain_epochs):
+        for epoch in range(n_epochs):
             self.model.train()
             epoch_loss = 0.0
             n_used = 0
@@ -426,31 +438,53 @@ class ActiveLearningLoop:
 
             epoch_loss /= n_used
 
-            if epoch_loss < best_loss - 1e-4:
-                best_loss = epoch_loss
-                patience_counter = 0
-                best_state = {
-                    n: p.detach().cpu().clone()
-                    for n, p in self.model.named_parameters()
-                    if p.requires_grad
-                }
+            if fixed:
+                # Running average of weights over the last `avg_last_epochs` epochs.
+                if epoch >= avg_start:
+                    with torch.no_grad():
+                        n_avg += 1
+                        if avg_state is None:
+                            avg_state = {
+                                n: p.detach().clone().float()
+                                for n, p in self.model.named_parameters()
+                                if p.requires_grad
+                            }
+                        else:
+                            for n, p in self.model.named_parameters():
+                                if n in avg_state:
+                                    avg_state[n] += (
+                                        p.detach().float() - avg_state[n]
+                                    ) / n_avg
             else:
-                patience_counter += 1
-                if patience_counter >= self.train_patience:
-                    break
+                if epoch_loss < best_loss - 1e-4:
+                    best_loss = epoch_loss
+                    patience_counter = 0
+                    best_state = {
+                        n: p.detach().cpu().clone()
+                        for n, p in self.model.named_parameters()
+                        if p.requires_grad
+                    }
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.train_patience:
+                        break
 
-        # Restore best-loss weights (not just the last epoch's).
-        if best_state is not None:
-            with torch.no_grad():
+        # Load the weights we keep.
+        with torch.no_grad():
+            if fixed and avg_state is not None:
+                for n, p in self.model.named_parameters():
+                    if n in avg_state:
+                        p.copy_(avg_state[n].to(dtype=p.dtype, device=p.device))
+            elif best_state is not None:
                 for n, p in self.model.named_parameters():
                     if n in best_state:
                         p.copy_(best_state[n].to(p.device))
 
+        cw = None if class_weights is None else [round(w, 3) for w in class_weights.tolist()]
+        mode = f"fixed {n_epochs} ep, avg last {n_avg}" if fixed else f"early-stop, best loss {best_loss:.4f}"
         print(
-            f"  Trained {epoch+1} epochs, best loss: {best_loss:.4f} "
-            f"(last: {epoch_loss:.4f}), lr={self.lr:.1e}, "
-            f"class_weights="
-            f"{None if class_weights is None else [round(w, 3) for w in class_weights.tolist()]}"
+            f"  Trained {epoch+1} epochs ({mode}), last loss: {epoch_loss:.4f}, "
+            f"lr={self.lr:.1e}, class_weights={cw}"
         )
 
         # BN stats must match the weights we are keeping.
@@ -528,7 +562,7 @@ class ActiveLearningLoop:
                 total_pixels=labeled_mask.numel(),
                 labeled_mask=labeled_mask,
                 vegetation_mask=veg,
-                seed=42 + round_idx,
+                seed=self.init_seed + round_idx,
             )
         elif self.strategy == "entropy":
             query_coords = uncertainty_query(
